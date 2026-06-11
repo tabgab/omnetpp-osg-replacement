@@ -131,12 +131,18 @@ Decouples Qtenv from the OSG impl, which lives in a **runtime-loaded** library
   `MediumVisualizerBase`, `LinkVisualizerBase`, `PathVisualizerBase`, …). Canvas and OSG
   impls each independently subclass these.
 - `canvas/` — 2D Qt impl using OMNeT++ `cCanvas`/`cFigure`.
-- `osg/` — **~84 files**, the 3D OSG impl. Categories: `base/`, `scene/`, `mobility/`,
+- `osg/` — **~90 files**, the 3D OSG impl. Categories: `base/`, `scene/`, `mobility/`,
   `physicallayer/`, `environment/`, `common/`, `linklayer/`, `networklayer/`,
   `transportlayer/`, `flow/`, `power/`, `integrated/`, `util/`.
 
 Typical inheritance: `FooVisualizerBase` (in `base/`) ← `FooOsgVisualizer` (in `osg/…`),
 parallel to `FooCanvasVisualizer` (in `canvas/…`).
+
+> The raw OSG **include surface** is modest — roughly **88 `#include <osg…>` lines across ~33
+> files** — so the include churn is small; the substantive work concentrates in the ~7
+> infrastructure files (`OsgUtils`, `OsgScene`, `NetworkNodeOsgVisualization`,
+> `MediumOsgVisualizer`, `SceneOsgVisualizerBase`, `PhysicalEnvironmentOsgVisualizer`,
+> `MobilityOsgVisualizer`).
 
 ### 2.2 The chokepoints — `src/inet/visualizer/osg/util/`
 - **`OsgUtils.{h,cc}`** — the shared OSG abstraction every visualizer calls. Factory fns:

@@ -28,9 +28,13 @@ preserving the existing functionality — with [OpenUSD](https://openusd.org/)
   Hydra 2 the default; 26.x continues), and ships a production-grade real-time GL
   renderer (**Hydra Storm**) plus an embeddable C++ API (`UsdImagingGLEngine`) that is
   exactly the shape we need to drop into a Qt OpenGL widget.
-- **We need the functionality, not OSG specifically.** The 3D viewer, network-node
+- **We need the functionality, not OSG/osgEarth specifically.** The 3D viewer, network-node
   models, mobility trails, signal-propagation rings, physical-environment obstacles,
-  and the geospatial/satellite scenarios all stay. Only the rendering substrate changes.
+  and the geospatial/satellite scenarios all stay — re-built on USD. **Both OSG and osgEarth
+  are removed entirely** (not kept behind a flag); where a sample or osgEarth-dependent feature
+  can't be carried over unchanged, it is **re-implemented** on the USD stack. Reduced visual
+  fidelity in some re-implemented geospatial scenarios is an accepted tradeoff — simulation
+  behavior is unaffected.
 
 ## What depends on OSG today (summary)
 
@@ -41,7 +45,7 @@ In short:
 |---|---|---|
 | **OMNeT++ kernel (public API)** | `cOsgCanvas` (`include/omnetpp/cosgcanvas.h`), `cObjectOsgNode` (`include/omnetpp/osgutil.h`), `cEnvir::refOsgNode/unrefOsgNode` | `osg::Node` only forward-declared in the kernel; the only hard compile dependency is `cObjectOsgNode : osg::Group`, guarded by `WITH_OSG`. |
 | **Qtenv viewer** | `IOsgViewer`/`IOsgViewerFactory` (`src/qtenv/iosgviewer.*`) + the runtime-loaded plugin `oppqtenv-osg` (`src/qtenv/osg/`) | **Already an abstraction with a runtime-loaded plugin and a `DummyOsgViewer` fallback** — the cleanest seam for swapping renderers. |
-| **INET 4.6** | ~84 files under `src/inet/visualizer/osg/`, plus osgEarth use in `OsgEarthGround` and `OsgGeographicCoordinateSystem` | The dominant consumer. A 3-way `base/` ⁄ `canvas/` ⁄ `osg/` split; `OsgUtils`/`OsgScene` are the chokepoints. |
+| **INET 4.6** | ~90 files under `src/inet/visualizer/osg/`, plus osgEarth use in `OsgEarthGround` and `OsgGeographicCoordinateSystem` | The dominant consumer. A 3-way `base/` ⁄ `canvas/` ⁄ `osg/` split; `OsgUtils`/`OsgScene` are the chokepoints. |
 | **Samples** | `samples/osg-intro`, `osg-earth`, `osg-indoor`, `osg-satellites` | Model-facing idioms: `.osgb` models, `.earth` maps, osgDB pseudo-loader transform URIs in `.ini`. |
 
 ## Repository contents
@@ -55,6 +59,7 @@ In short:
 | [`docs/04-capability-mapping.md`](docs/04-capability-mapping.md) | OSG/osgText/osgDB → OpenUSD/Hydra capability mapping table, flagging the no-clean-mapping cases. |
 | [`docs/05-geospatial.md`](docs/05-geospatial.md) | The osgEarth replacement strategy (the hardest part): coordinate systems, terrain, annotations. |
 | [`docs/06-risks-and-decisions.md`](docs/06-risks-and-decisions.md) | Risk register with mitigations, honest fidelity gaps, and the open decisions needing sign-off. |
+| [`docs/07-plan-review.md`](docs/07-plan-review.md) | Adversarial review of the plan (Fable-model agent), verified against the real source tree; its findings are folded into the docs above. |
 
 ## Relationship to `omnetpp-usdenv`
 

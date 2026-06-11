@@ -9,6 +9,12 @@ exist. The "no clean mapping" rows are the design risks tracked in
 > USD API names should be confirmed against the OpenUSD version pinned at build time; they
 > are stable across 25.11/26.x for the surface used here.
 
+> **Global authoring conventions (apply to every row):** all stages are authored **Z-up,
+> `metersPerUnit=1`** to match OSG/INET — USD's defaults are Y-up/cm and glTF is Y-up, so the
+> asset pipeline bakes a Y-up→Z-up correction (Decision Q8, `docs/06`). For always-camera-facing
+> billboards, also consider USD `UsdGeomModelAPI` **draw-mode "cards"** as a simpler option than
+> per-tick re-orientation.
+
 ## Scene-graph structure
 
 | OSG | OpenUSD / Hydra | Clean? | Notes |

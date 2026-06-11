@@ -1,118 +1,94 @@
 # 05 — Geospatial Replacement (osgEarth → OpenUSD)
 
-The hardest part of the migration. osgEarth provides a decade of geospatial infrastructure —
-SRS/coordinate math, **live tiled terrain & imagery streaming**, elevation queries, and a
-rich annotation/feature/symbology API. **There is no drop-in USD replacement.** This document
-sets the strategy: a pragmatic minimal layer first, with honest fidelity gaps, and tiled
-streaming as a deferred option.
+**Goal: remove osgEarth entirely** and replace its functionality with a native USD + PROJ
+stack. osgEarth provides a decade of geospatial infrastructure — SRS/coordinate math, **live
+tiled terrain & imagery streaming**, elevation queries, and a rich annotation/feature/
+symbology API — and **there is no drop-in USD replacement**. So we build one. Where a
+geospatial sample or INET feature cannot be carried over at full fidelity, **it is
+re-implemented on the USD stack with documented, accepted fidelity changes** — keeping
+osgEarth is not an option.
 
-## 1. What uses osgEarth today
+## 1. What uses osgEarth today (all to be removed)
 
 - **INET** (`#if defined(WITH_OSGEARTH) && defined(INET_WITH_VISUALIZATIONOSG)`):
-  - `src/inet/visualizer/osg/scene/SceneOsgEarthVisualizer` — loads a `.earth` file →
-    `MapNode` → `GeoTransform` → `SimulationScene`; `setViewerStyle(STYLE_EARTH)`;
-    `setEarthViewpoint`.
+  - `src/inet/visualizer/osg/scene/SceneOsgEarthVisualizer` — `.earth` → `MapNode` →
+    `GeoTransform` → `SimulationScene`; `setViewerStyle(STYLE_EARTH)`; `setEarthViewpoint`.
   - `src/inet/environment/ground/OsgEarthGround` — `ElevationQuery`/`Map`/`GeoPoint` for
     terrain-following mobility.
   - `src/inet/common/geometry/common/GeographicCoordinateSystem` —
-    `OsgGeographicCoordinateSystem`: lat/lon/alt ↔ ECEF ↔ scene-local via `MapSRS` + `Matrixd`.
-    Implements the `IGeographicCoordinateSystem` interface.
+    `OsgGeographicCoordinateSystem`: lat/lon/alt ↔ ECEF ↔ scene-local via `MapSRS` + `Matrixd`;
+    implements the `IGeographicCoordinateSystem` interface.
 - **Samples** (`osg-earth`, `osg-satellites`) use much more: `MapNode`, `GeoTransform`,
   `GeoPoint`, `SpatialReference`, `SkyNode`, annotations (`LabelNode`, `CircleNode`,
   `FeatureNode`, `RectangleNode`, `LocalGeometryNode`), features (`Feature`, `LineString`,
   `MultiGeometry`), symbology (`Style`, `TextSymbol`, `LineSymbol`, `PolygonSymbol`,
-  `AltitudeSymbol` drape/clamp), `Util::{EarthManipulator, SkyNode, LinearLineOfSightNode,
+  `AltitudeSymbol`), `Util::{EarthManipulator, SkyNode, LinearLineOfSightNode,
   LineOfSightTether}`. `.earth` files use `type=geocentric` + OSM/readymap XYZ tile layers +
-  a filesystem tile cache + `<sky>`.
+  filesystem cache + `<sky>`. **These samples are re-implemented (M11).**
 
-## 2. Options considered
+## 2. The committed replacement (M10) — native USD + PROJ
 
-### (a) Cesium-native / 3D Tiles → USD
-[cesium-native](https://github.com/CesiumGS/cesium-native) (Apache-2.0, C++) streams 3D Tiles
-& glTF and provides WGS84 ellipsoid math, ECEF↔geographic↔ENU transforms, and tile LOD
-selection. It powers the Unreal/Unity/Omniverse integrations; [`vsgCs`](https://github.com/timoore/vsgCs)
-shows integration with a non-Omniverse C++ scene graph.
-**Verdict:** the right long-term answer for *live* terrain, but heavy — tiles arrive as glTF
-that must be converted to USD prims at runtime and inserted/removed from the scene index as
-LOD changes, coordinated with sim time. A 3–6 month subsystem. **Deferred to Phase 3 (M13).**
+This ships as the product (not optional, not behind an osgEarth fallback):
 
-### (b) Static offline USD globe/terrain
-Pre-generate a static `.usd` globe or terrain tile from public DEM (SRTM/Copernicus 30 m) +
-imagery (OSM, Natural Earth) via GDAL/PDAL/Cesium terrain-builder, referenced at startup.
-**Verdict:** great for satellite-orbit views (a textured sphere suffices) and adequate for
-ground scenarios where exact elevation is not critical. No streaming, fixed resolution.
-**This is the backbone of Phase 1.**
-
-### (c) Minimal custom geospatial layer  — **RECOMMENDED for Phase 1**
-Implement exactly what INET needs, no general tile engine:
-
-1. **Coordinate conversion — PROJ 9.x.** `OsgGeographicCoordinateSystem` only needs
-   EPSG:4326 (geodetic WGS84) ↔ EPSG:4978 (ECEF). `proj_create_crs_to_crs("EPSG:4326",
-   "EPSG:4978", …)` gives identical semantics to osgEarth's `MapSRS`. PROJ is the de-facto
-   open geodesy library, actively maintained, packaged everywhere.
-   → **`UsdGeographicCoordinateSystem`** implements the existing `IGeographicCoordinateSystem`
-   interface (no interface change), computing the scene-origin ENU matrix in plain C++.
-
-2. **GeoTransform → `UsdGeoAnchor`.** A C++ class holding a `UsdGeomXform` prim path;
-   `setPosition(lat, lon, alt)` computes ECEF via PROJ, applies the precomputed inverse
-   scene-origin ENU matrix, and authors `xformOp:translate`. Mirrors `osgEarth::GeoTransform`
-   semantics.
-
+1. **Coordinate conversion — PROJ 9.x.** `OsgGeographicCoordinateSystem` only needs EPSG:4326
+   (geodetic WGS84) ↔ EPSG:4978 (ECEF): `proj_create_crs_to_crs("EPSG:4326","EPSG:4978",…)`,
+   identical semantics to osgEarth's `MapSRS`. PROJ is the de-facto open geodesy library,
+   actively maintained, packaged everywhere. → **`UsdGeographicCoordinateSystem`** implements
+   the existing `IGeographicCoordinateSystem` interface (no interface change), computing the
+   scene-origin ENU matrix in plain C++.
+2. **GeoTransform → `UsdGeoAnchor`.** Holds a `UsdGeomXform` prim path; `setPosition(lat,lon,
+   alt)` → ECEF via PROJ → inverse scene-origin ENU → `xformOp:translate`. Z-up, meters
+   (Decision Q8).
 3. **Earth sphere (satellite scenarios).** `UsdGeomSphere` r≈6 371 000 m, textured with an
-   8K Natural-Earth `UsdUVTexture`; daily rotation = a time-sampled `xformOp:rotateZ`.
-
-4. **Static terrain (ground scenarios).** A `UsdGeomMesh` baked offline from a single SRTM
-   tile over the simulation area, OSM imagery draped at bake time. No live tiles.
-
-5. **Elevation → `UsdEarthGround`.** Replaces `OsgEarthGround`; query height by ray-casting a
-   vertical ray against the terrain mesh (CPU BVH/KD-tree over terrain verts). Preserves
-   `computeGroundProjection()`/`computeGroundNormal()` semantics.
-
+   8K Natural-Earth `UsdUVTexture`; daily rotation = time-sampled `xformOp:rotateZ`. This is
+   the **highest-fidelity** case — a textured sphere is most of what osg-satellites needs.
+4. **Terrain (ground scenarios).** A `UsdGeomMesh` baked offline from an SRTM/Copernicus tile
+   over the simulation area, OSM imagery draped at bake time. Static, fixed resolution.
+5. **Elevation → `UsdEarthGround`.** Replaces `OsgEarthGround`; height via vertical ray cast
+   against the terrain mesh (CPU BVH/KD-tree). Preserves `computeGroundProjection()` /
+   `computeGroundNormal()`.
 6. **`SceneOsgEarthVisualizer` → `SceneUsdGeoVisualizer`.** Loads the earth/terrain `.usd`,
-   sets `STYLE_EARTH` (→ viewer earth-orbit controller) and the earth viewpoint, sets the
+   sets `STYLE_EARTH` (→ viewer earth-orbit controller) + earth viewpoint, sets the
    scene-origin locator via PROJ.
 
 ## 3. Annotation / feature equivalents
 
-| osgEarth | Phase-1 replacement | Fidelity |
+| osgEarth | Replacement | Fidelity |
 |---|---|---|
 | `Annotation::LabelNode` | viewer HUD text at projected geo position | no auto-declutter |
 | `Annotation::CircleNode` (range, terrain-draped) | geo-anchored `UsdGeomBasisCurves` circle | flat — **no terrain drape** |
 | `Annotation::FeatureNode`/`LineString` (trails) | `UsdGeomBasisCurves`, points in scene-local via `UsdGeoAnchor` | full for non-draped |
 | `Annotation::RectangleNode` (boundary) | `UsdGeomMesh` quad at fixed height | **no clamp** |
-| `Util::SkyNode` (atmosphere/lighting) | static skybox sphere with sky/space texture | **no time-of-day** |
-| `Util::LinearLineOfSightNode`/`Tether` (satellite LOS) | C++ LOS test (segment vs ellipsoid/terrain) + `UsdGeomBasisCurves` recolored by result | full for ellipsoid; terrain LOS approx |
-| feature symbology / **building extrusion** (`boston.earth`) | — | **not provided** — osgEarth-specific |
+| `Util::SkyNode` (atmosphere/lighting) | static skybox sphere + the viewer's explicit lighting | **no time-of-day** |
+| `Util::LinearLineOfSightNode`/`Tether` (satellite LOS) | C++ LOS test (segment vs ellipsoid/terrain) + recolored `UsdGeomBasisCurves` | full for ellipsoid; terrain LOS approx |
+| feature symbology / **building extrusion** (`boston.earth`) | — | **not provided in v1** — osgEarth-specific |
 
-## 4. Honest fidelity gaps (Phase 1)
+## 4. Honest fidelity gaps (v1) — accepted tradeoffs
 
-Phase 1 explicitly does **not** provide:
-- live tiled terrain/imagery streaming (high-res DEM, road networks, 3D buildings);
-- terrain altitude clamping/draping for annotations and range circles;
-- osgEarth's label decluttering;
-- osgEarth's CSS-like feature symbology;
-- the `boston.earth` 3D-building extrusion (`feature_geom` + shapefiles) — no plausible USD
-  equivalent without a full geospatial feature pipeline.
+v1 does **not** provide live tiled terrain/imagery streaming, terrain altitude clamping/
+draping, label decluttering, CSS-like feature symbology, or `boston.earth` 3D-building
+extrusion. Per the project goal, **these are accepted tradeoffs of removing osgEarth**, not
+reasons to keep it. **Simulation behavior is never affected — only visuals.**
 
-**Acceptable degraded behavior:**
-- *osg-earth scenario:* nodes on a static map/terrain; range circles as flat geometry; trails
-  as lines without terrain adherence; no buildings. **Protocol/routing behavior is
-  unaffected** — only visuals degrade.
-- *osg-satellites scenario:* textured earth globe with rotation; static skybox; LOS lines.
-  This is the **highest-fidelity** Phase-1 case (a sphere is most of what's needed).
-- *INET `SceneOsgEarthVisualizer` users:* migrate to `SceneUsdGeoVisualizer` understanding
-  that live terrain awaits Phase 3.
+- *osg-earth (re-implemented):* nodes on a static map/terrain; flat range circles; trails as
+  lines without terrain adherence; no buildings.
+- *osg-satellites (re-implemented):* textured earth globe with rotation; static skybox; LOS
+  lines. High fidelity.
+- *INET `SceneOsgEarthVisualizer` users:* migrate to `SceneUsdGeoVisualizer`; live terrain is
+  the optional M13 enhancement.
 
 ## 5. Build wiring
-- New macro `WITH_USD_GEO` (parallels `WITH_OSGEARTH`); guards rename in place when porting
-  `GeographicCoordinateSystem`/`OsgEarthGround`.
-- PROJ added as an INET/OMNeT++ optional dependency (detected in `configure.in`).
-- `.earth` files retired for Phase 1 in favor of a simple NED/`.ini` parameter set (earth
-  texture path, terrain `.usd` path, origin lat/lon/alt); for Phase 3 a `.earth`-equivalent
-  becomes a 3D-Tiles URL.
+- `WITH_USD_GEO` (replaces `WITH_OSGEARTH`); guards reimplemented in place when porting
+  `GeographicCoordinateSystem`/`OsgEarthGround`. At M12 the `WITH_OSGEARTH` paths are deleted.
+- PROJ added as an optional dependency (detected in `configure.in`).
+- `.earth` files retired in favor of NED/`.ini` parameters (earth texture, terrain `.usd`,
+  origin lat/lon/alt). For M13 a `.earth`-equivalent becomes a 3D-Tiles URL.
 
-## 6. Phase 3 (M13) — live tiled terrain (deferred)
-Integrate cesium-native (CMake → static lib or pkg-config) into the `opp_makemake` build;
+## 6. M13 — live tiled terrain (optional later enhancement, **not** a removal prerequisite)
+[cesium-native](https://github.com/CesiumGS/cesium-native) (Apache-2.0, C++) streams 3D Tiles
+& glTF and provides WGS84/ECEF/ENU math and tile LOD; `vsgCs` shows non-Omniverse C++
+integration. Integrate via CMake (static lib / pkg-config) into the `opp_makemake` build;
 convert per-tile glTF → `UsdGeomMesh` prims, insert/remove from the scene index on LOD change;
-elevation via cesium-native's results; config via a 3D-Tiles URL (Cesium Ion or a local tile
-server). This restores osgEarth-class terrain fidelity on the future-proof substrate.
+elevation via cesium-native results; config via a 3D-Tiles URL (Cesium Ion or a local tile
+server). This restores osgEarth-class terrain fidelity — but the product already ships
+**without osgEarth** after M10–M12 regardless of whether M13 is done.
