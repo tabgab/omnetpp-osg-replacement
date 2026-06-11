@@ -63,6 +63,17 @@ reference to the shared Hgi. (Found via qInfo breadcrumbs; qDebug is compiled ou
 release Qtenv builds, and Qtenv appears to swallow qWarning — use qInfo for plugin
 diagnostics.)
 
+**Picking saga resolved (user-verified "works fine now"):** the present shader had a
+spurious V-flip (the Hydra color AOV's bottom-up GL row order already matches Metal's
++y-up NDC under direct mapping) — the displayed image was upside-down, masked by the
+spike's symmetric test scene, exposed by the usd-intro ground plane. Users were
+clicking a *mirrored* image, which made picking feel broken. Diagnosed with a
+click-authored marker prim + per-click NDC projection logging. Same fix applied to
+`impl/spike/main.mm`. Final pick design: modern `TestIntersection(PickParams)` with
+`resolveDeep`, ~24px window, **bound-objects-preferred** (nearest to camera), so
+unbound scenery (ground) never steals a click. Note: `resolveDeep` hit points are
+approximate by design — don't use them as surface positions.
+
 ## Known transitional limitations
 
 - `configure.in` not yet regenerated — `Makefile.inc`/`config.h` are hand-edited (M1's

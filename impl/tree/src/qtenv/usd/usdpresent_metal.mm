@@ -60,7 +60,12 @@ vertex VOut vmain(uint vid [[vertex_id]]) {
     float2 p = float2((vid << 1) & 2, vid & 2);
     VOut o;
     o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);
-    o.uv  = float2(p.x, 1.0 - p.y);
+    // NO V-flip: the Hydra color AOV is bottom-up (GL row order), which matches
+    // Metal NDC +y-up through this direct mapping. The earlier (1.0 - p.y) flip
+    // displayed the image upside-down - masked in the spike by its symmetric
+    // test scene, exposed by the usd-intro ground plane (and the resulting
+    // visual-vs-pick-space mirror made click-picking feel broken).
+    o.uv  = float2(p.x, p.y);
     return o;
 }
 fragment float4 fmain(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {

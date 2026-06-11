@@ -34,6 +34,7 @@
 #include <pxr/imaging/hgi/tokens.h>
 #include <pxr/imaging/hd/driver.h>
 #include <pxr/imaging/hd/tokens.h>
+#include <pxr/imaging/hdx/pickTask.h>   // HdxPickTokens (resolve modes)
 #include <pxr/imaging/glf/simpleLight.h>
 #include <pxr/imaging/glf/simpleMaterial.h>
 #include <pxr/imaging/cameraUtil/framing.h>
@@ -360,26 +361,48 @@ std::vector<cObject *> UsdViewer::objectsAt(const QPoint& pos)
 
     GfFrustum pickFrustum = lastFrustum;
     pickFrustum.Transform(lastViewMatrix.GetInverse());
-    // ~6px pick window: a 1px window makes picking feel unreliable with the
-    // ID-pass-based TestIntersection (Risk R2)
+    // generous ~24px pick window (Risk R2: ID-pass picking; also tolerates the
+    // small screen-space offset observed in practice)
     GfFrustum narrowed = pickFrustum.ComputeNarrowedFrustum(
-        GfVec2d(ndcX, ndcY), GfVec2d(6.0 / w, 6.0 / h));
+        GfVec2d(ndcX, ndcY), GfVec2d(24.0 / w, 24.0 / h));
 
-    GfVec3d hitPoint, hitNormal;
-    SdfPath hitPrimPath, hitInstancerPath;
-    int hitInstanceIndex = 0;
     UsdImagingGLRenderParams rp;
     rp.frame = UsdTimeCode::Default();
 
-    bool hit = engine->TestIntersection(
-        narrowed.ComputeViewMatrix(), narrowed.ComputeProjectionMatrix(),
-        handle->getStage()->GetPseudoRoot(), rp,
-        &hitPoint, &hitNormal, &hitPrimPath, &hitInstancerPath, &hitInstanceIndex);
+    // resolveDeep gathers ALL prims intersecting the pick frustum (even
+    // occluded ones); we then prefer BOUND objects (nearest to camera first),
+    // so the unbound ground plane can never steal a click aimed at a node.
+    UsdImagingGLEngine::PickParams pickParams;
+    pickParams.resolveMode = HdxPickTokens->resolveDeep;
+    UsdImagingGLEngine::IntersectionResultVector results;
 
-    if (hit) {
-        if (cObject *obj = handle->lookupObjectOrAncestor(hitPrimPath))
-            objects.push_back(obj);
+    bool hit = engine->TestIntersection(
+        pickParams, narrowed.ComputeViewMatrix(), narrowed.ComputeProjectionMatrix(),
+        handle->getStage()->GetPseudoRoot(), rp, &results);
+
+    cObject *best = nullptr;
+    double bestDist = 0;
+    std::string bestPath, allPaths;
+    for (const auto& r : results) {
+        allPaths += r.hitPrimPath.GetString() + " ";
+        cObject *obj = handle->lookupObjectOrAncestor(r.hitPrimPath);
+        if (!obj)
+            continue;   // unbound scenery (ground etc.) never steals the pick
+        double dist = (r.hitPoint - camEye).GetLength();
+        if (!best || dist < bestDist) {
+            best = obj;
+            bestDist = dist;
+            bestPath = r.hitPrimPath.GetString();
+        }
     }
+
+    static int pickDiagBudget = 10;
+    if (pickDiagBudget > 0) { --pickDiagBudget;
+        qInfo() << "UsdViewer: pick" << (hit ? "candidates:" : "MISS") << allPaths.c_str()
+                << "-> " << (best ? best->getFullPath().c_str() : "(none)"); }
+
+    if (best)
+        objects.push_back(best);
     return objects;
 }
 

@@ -116,7 +116,11 @@ vertex VOut vmain(uint vid [[vertex_id]]) {
     float2 p = float2((vid << 1) & 2, vid & 2);
     VOut o;
     o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);
-    o.uv  = float2(p.x, 1.0 - p.y);          // flip V (AOV is bottom-up)
+    // NO V-flip: the AOV's bottom-up (GL) row order matches Metal NDC +y-up
+    // through direct mapping. The earlier (1.0 - p.y) flip showed the image
+    // upside-down - masked here by the symmetric test scene, found via the
+    // usd-intro sample's ground plane.
+    o.uv  = float2(p.x, p.y);
     return o;
 }
 fragment float4 fmain(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {

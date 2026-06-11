@@ -115,6 +115,7 @@ class UsdScene : public cSimpleModule, public cListener
         tokenTranslateOp = UsdGeomXformable(tokenSphere.GetPrim()).AddTranslateOp();
         tokenTranslateOp.Set(nodePos(0) + GfVec3d(0, 0, 1.0));
         setColor(tokenSphere.GetPrim(), GfVec3f(1.0f, 0.85f, 0.1f));
+        handle->bindObject(SdfPath("/World/Token"), this);   // clicking the token selects the scene
 
         // a satellite orbiting the ring, driven smoothly by simulation time
         UsdGeomSphere orbiter = UsdGeomSphere::Define(stage, SdfPath("/World/Orbiter"));
