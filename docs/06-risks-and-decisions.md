@@ -76,9 +76,10 @@ OSG — making old OSG model code compile forever is explicitly not a goal.
 ### R11 — Windows toolchain: USD(MSVC) vs OMNeT++(MinGW) — **HIGH** **(review: new)**
 OpenUSD on Windows is effectively built with **MSVC**; OMNeT++ ships a **MinGW** toolchain.
 MSVC and MinGW C++ ABIs are incompatible — a MinGW OMNeT++ cannot link an MSVC-built `usd_ms`.
-**Mitigation/options (Decision Q9):** (a) build/ship USD with MinGW/clang (may need patches);
-(b) provide an MSVC-built OMNeT++ Qtenv+USD plugin on Windows; (c) defer Windows USD support to
-a later phase. **Needs a decision before Windows packaging.**
+**Mitigation (Decision Q9 — DECIDED): defer native Windows.** Windows users run under **WSL2**
+(Linux toolchain → HgiGL; WSLg supplies the GL surface), which sidesteps the MSVC/MinGW ABI
+problem entirely for now. Native MSVC/MinGW Windows packaging is a later phase, not on the
+critical path.
 
 ### R12 — Up-axis & units mismatch — **HIGH** **(review: new)**
 OSG/INET Z-up & meters; USD default Y-up & cm; glTF mandated Y-up. Unhandled → every model
@@ -103,7 +104,7 @@ plugin's `osg.msg`; a USD-only build loses them.
 | **Q6** | Text strategy scope | (a) HUD overlay only; (b) HUD + 3D rasterized-quad atlas | **(a)** for annotations; **(b)** only if 3D-anchored labels prove necessary. |
 | **Q7** | OpenUSD version pin | latest (25.11/26.x) vs pinned LTS-ish | pin a tested release per OMNeT++ release; verify the `UsdImagingGLEngine` surface against it. |
 | **Q8** | Up-axis & units **(review: new)** | author `upAxis=Z, metersPerUnit=1` vs convert to USD defaults | **`upAxis=Z, metersPerUnit=1`** — matches OSG/INET; bake the correction at asset conversion. |
-| **Q9** | Windows toolchain **(review: new)** | (a) MinGW/clang USD build; (b) MSVC OMNeT++ on Windows; (c) defer Windows | needs owner input; **(c)** likely acceptable for an early release, **(b)** for parity. |
+| **Q9** | Windows toolchain **(review: new)** | (a) MinGW/clang USD build; (b) MSVC OMNeT++ on Windows; (c) defer native Windows — use WSL | **DECIDED (2026-06-11): (c) — defer native Windows.** Windows users run under **WSL2** (the Linux/HgiGL path; WSLg provides the GL surface), which is good enough for now. Native MSVC/MinGW Windows support is a later phase. |
 
 ## C. De-risking spike (do first) **(review: per-platform)**
 Before M3, build the minimal OpenUSD imaging config and a ~200-line Qt app rendering a

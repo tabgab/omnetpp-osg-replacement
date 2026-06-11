@@ -2,7 +2,7 @@
 
 **Status:** Planning complete (revised after an adversarial review — see [`docs/07-plan-review.md`](docs/07-plan-review.md)), implementation not started
 **Target trees:** OMNeT++ 6.4.0aipre2 (`~/DEV/omnetpp-6.4.0aipre2`), INET 4.6.0 (`samples/inet-4.6.0`)
-**Renderer target:** OpenUSD ≥ 25.11 with Hydra 2; **Storm/HgiGL** on Linux & Windows, **Storm/HgiMetal** on macOS; embedded via `UsdImagingGLEngine`
+**Renderer target:** OpenUSD ≥ 25.11 with Hydra 2; **Storm/HgiGL** on Linux (and Windows via WSL2), **Storm/HgiMetal** on macOS; embedded via `UsdImagingGLEngine`
 
 ---
 
@@ -114,8 +114,9 @@ loader prefers USD when built. At parity, `WITH_OSG`/`WITH_OSGEARTH`, `src/qtenv
 ### D6 — Rendering backend per platform: **HgiGL on Linux/Windows, HgiMetal on macOS**
 Hydra Storm's HgiGL needs OpenGL ≥ 4.5; macOS caps GL at 4.1, so macOS uses **HgiMetal +
 hgiInterop** (the path `usdview` uses on macOS). The viewer selects the Hgi backend at
-construction and only falls back to `DummyViewer` if no suitable backend exists. Windows
-needs a toolchain decision (USD is effectively MSVC-built; OMNeT++ ships MinGW) — see Q9.
+construction and only falls back to `DummyViewer` if no suitable backend exists. **Windows is
+deferred (Q9, DECIDED): run under WSL2 (the Linux/HgiGL path; WSLg provides the GL surface);
+native MSVC/MinGW Windows is a later phase.**
 
 ---
 
@@ -205,9 +206,9 @@ against the real source (its findings are in `docs/07-plan-review.md`, folded in
 
 ## 7. Immediate next steps
 
-1. Sign off the open decisions in [`docs/06-risks-and-decisions.md`](docs/06-risks-and-decisions.md)
-   — notably the **Windows toolchain (Q9)** and **up-axis/units (Q8)**, plus whether to build
-   the optional migration facade (Q1) and where INET work lands (Q4).
+1. Sign off the remaining open decisions in [`docs/06-risks-and-decisions.md`](docs/06-risks-and-decisions.md)
+   — **up-axis/units (Q8)**, whether to build the optional migration facade (Q1), and where
+   INET work lands (Q4). *(Q9 Windows is decided: defer native, use WSL2.)*
 2. Stand up a minimal OpenUSD build (imaging config: `usdImaging`, `usdImagingGL`, `hdSt`,
    `hgiGL`, **`hgiMetal`**, `hgiInterop`; monolithic `usd_ms`) and a throwaway
    Qt + `UsdImagingGLEngine` spike on **both Linux/GL and macOS/Metal** to de-risk the
