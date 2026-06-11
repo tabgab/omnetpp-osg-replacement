@@ -155,19 +155,24 @@ HgiGL requires **OpenGL ≥ 4.5**. **macOS caps OpenGL at 4.1**, so a "fall back
 < 4.5" rule would disable 3D on every Mac. Instead:
 - **Linux (and Windows-via-WSL):** Storm + **HgiGL** (require GL ≥ 4.5), rendering *directly*
   into a `QOpenGLWidget` — no interop.
-- **macOS:** Storm + **HgiMetal**, presenting via a **Metal-backed surface** — a `QRhiWidget`
-  (Qt 6.7+) with the Metal backend, or a `CAMetalLayer`-backed `QWindow` — compositing Hydra's
-  HgiMetal color texture in Metal, with **no GL↔Metal interop**. The build must include the
-  `hgiMetal` library. *(Updated 2026-06-11 from the spike: the earlier "HgiMetal + hgiInterop
-  into a `QOpenGLWidget` GL FBO" path was tried and **does not present** on macOS — see Risk R3.
-  Picking and the QPainter overlay work; only the GL-interop present fails, hence the Metal
-  surface.)*
+- **macOS:** Storm + **HgiMetal**, presenting via a **Metal-native path, validated end-to-end
+  by the spike (2026-06-11)**: a plain native `QWidget` (`WA_NativeWindow`,
+  `paintEngine()==nullptr`) hosting our **`CAMetalLayer` as a sublayer** of the view's backing
+  layer; Hydra renders to the color AOV (`SetEnablePresentation(false)` +
+  `SetRendererAov(color)`), and the render buffer's `GetResource(false)` texture is blitted to
+  the layer drawable by a tiny MSL fullscreen-triangle pipeline. **No GL↔Metal interop.** The
+  build must include `hgiMetal`. Verified dead-ends (do not retry): GL-interop present into
+  `QOpenGLWidget`/`QOpenGLWindow` (silent no-op — `hgiInterop` is GL-destination-only);
+  `QWindow::MetalSurface` (crashes in Qt 6.11's `QNSView displayLayer:`); presenting the
+  `GetAovTexture` task-context texture (goes stale after picks). One known oddity: a per-frame
+  synchronizing AOV readback is currently load-bearing for present freshness — to be replaced
+  with an `MTLSharedEvent` fence in M3. Full recipe: `impl/spike/README.md` §6.
 - Select the backend at `UsdViewer` construction; only fall back to `DummyViewer` if no
   suitable backend is available.
 
-> **Implication:** on macOS the viewer widget is **not** a `QOpenGLWidget` (it's a Metal-backed
-> `QRhiWidget`/`QWindow`). The per-platform widget base is therefore a compile-time choice in
-> `oppqtenv-usd`. This is a refinement to M3 surfaced by the de-risking spike.
+> **Implication:** on macOS the viewer widget is **not** a `QOpenGLWidget` (it's a native
+> `QWidget` + `CAMetalLayer` sublayer). The per-platform widget base is therefore a
+> compile-time choice in `oppqtenv-usd`. Surfaced and validated by the de-risking spike.
 
 ### Shared GL context (review fix)
 Sharing one `Hgi`/`HdDriver` across multiple 3D inspectors requires

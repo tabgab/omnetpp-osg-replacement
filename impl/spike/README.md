@@ -228,27 +228,66 @@ bring-up).
 - Removed `#include <pxr/base/gf/range2i.h>` — no such header/type; the framing uses `GfRect2i`.
 - Added Qt includes: `QtGui/QOpenGLContext`, `QtGui/QImage`, `QtGui/QFont`, `QtCore/QCommandLineOption`.
 
-### Runtime results — macOS (2026-06-11, Apple Silicon, OpenUSD 25.11, Qt 6.11.1)
+### Runtime results — macOS (2026-06-11, Apple Silicon, macOS 26.4, OpenUSD 25.11, Qt 6.11.1)
 
-First interactive run + a magenta-clear bisect diagnostic established:
+**FINAL STATUS: PASSED.** After an iterative debugging session (~8 runs with a human at the
+screen), the Metal-native spike renders, picks, and orbits stably. The journey produced the
+exact macOS recipe — and four dead-ends — that the production viewer (M3) must honor:
 
 | Check | Result |
 |---|---|
-| HgiMetal backend selected | ✅ `Shared Hgi created: "Metal"` |
-| Storm render delegate | ✅ `HdStormRendererPlugin` |
-| GL context | 4.1 CoreProfile (macOS max — why HgiGL is unusable here) |
-| Scene authoring (Z-up sphere) | ✅ (picking ray-tests hit real geometry) |
-| **Picking → SdfPath** | ✅ `Hit: /World/Sphere` with correct world coords (validates the `cObjectOsgNode`→`SdfPath` replacement on Metal) |
-| QPainter HUD overlay over GL | ✅ clean, no `--safe-overlay` needed (over a GL clear) |
-| **Hydra image presented to the `QOpenGLWidget`** | ❌ **black/absent** — magenta-clear bisect shows the widget FBO presents (magenta visible) but Hydra's **Metal→GL interop does not composite** into it |
+| HgiMetal backend + Storm | ✅ `Shared Hgi created: "Metal"`, `HdStormRendererPlugin` |
+| Z-up, meters scene (Q8) | ✅ both spheres render correctly shaded |
+| **Picking → SdfPath** | ✅ `Hit: /World/Sphere` / `/World/Marker` / `(no hit)` with correct world coords |
+| Interactive orbit (continuous re-render) | ✅ stable under sustained dragging |
+| **Hydra image on screen** | ✅ via the **Metal-native present** below (GL interop unusable — see dead-ends) |
 
-**Confirmed R3 root cause:** `QOpenGLWidget` uses a non-zero internal FBO; USD's HgiMetal→OpenGL
-interop (`SetPresentationOutput(HgiTokens->OpenGL, defaultFramebufferObject())`) does not land
-its output there. **Fix / decision:** on macOS the viewer must present via **Metal** — a
-`QRhiWidget` with the Metal backend (Qt 6.7+) or a `CAMetalLayer`-backed `QWindow` — so Hydra's
-HgiMetal color texture is composited in Metal with **no GL interop**. (Linux: HgiGL renders
-*directly* into the `QOpenGLWidget`, no interop — expected to work, still to be validated on a
-Linux/WSL run.)
+**The working recipe (`main.mm`):**
+1. `Hgi::CreatePlatformDefaultHgi()` → HgiMetal; one shared `Hgi` + `HdDriver` for all views.
+2. `UsdImagingGLEngine` with `Parameters::driver`; **`SetEnablePresentation(false)`**;
+   **`SetRendererAov(HdAovTokens->color)`** (the `frameRecorder::Record` recipe — explicit
+   `{color,depth}` or no AOV call both leave `GetAovTexture(color)` null in 25.11).
+3. A **plain native `QWidget`** (`WA_NativeWindow`, `paintEngine()==nullptr`) with our
+   **`CAMetalLayer` added as a SUBLAYER** of the view's backing layer.
+4. Per frame: `Render()` → `CommitPrimaryCommandBuffer(WaitUntilCompleted)` →
+   **synchronizing AOV readback** (`colorRb->Map(); Unmap();` — see below) → take the texture
+   from **`colorRb->GetResource(false)`** (the render buffer's own resolved texture, NOT
+   `GetAovTexture`'s task-context texture) → blit it to the layer drawable with a 3-vertex
+   fullscreen-triangle MSL pipeline (V-flipped) → `presentDrawable` → `commit` →
+   `waitUntilCompleted` (frame pacing).
 
-*Note:* the magenta `glClear` in `paintGL` is a temporary bisect diagnostic; it will be removed
-when the macOS Metal present path is implemented.
+**The load-bearing oddity:** the per-frame `Map()/Unmap()` readback of the color AOV is
+**required**. Across every instrumented frame (16/16 in two runs) the presented drawable was
+byte-identical to the AOV when the readback preceded the present, and the present went stale
+(clear-only) within seconds of continuous re-renders without it — even with
+`CommitPrimaryCommandBuffer(WaitUntilCompleted)` *and* post-present `waitUntilCompleted` in
+place. Whatever ordering `HgiTextureReadback` establishes inside HgiMetal is doing the real
+synchronization. Cost ≈ a few ms/frame on unified memory. **TODO(M3): replace with a proper
+fence (`MTLSharedEvent`) or replicate hgiInterop's internal commit dance.**
+
+**Dead-ends (verified, do not retry):**
+1. **`QOpenGLWidget` + `SetPresentationOutput(OpenGL, fbo)`** — Hydra's HgiMetal→GL interop
+   silently composites nothing into the widget's non-zero FBO (clean log, `converged:true`,
+   picking works, screen empty). A magenta-`glClear` bisect proved the widget FBO itself
+   presents fine.
+2. **`QOpenGLWindow` (FBO 0)** — same silent no-op; FBO identity was not the issue.
+   `hgiInterop` only supports **OpenGL destinations** (`hgiInterop.cpp:57`); there is no
+   Metal→Metal present in USD. macOS GL is also deprecated → GL must be off the macOS path.
+3. **`QWindow::MetalSurface` + replacing or even reusing Qt's layer** — crashes in
+   `-[QNSView(Drawing) displayLayer:]` (EXC_BAD_ACCESS) after ~2 frames, both with a
+   replacement layer and with Qt's own `CAMetalLayer`. Qt 6.11's Metal-surface `QNSView`
+   path is not robust to external drawable presentation; the **sublayer** approach avoids
+   Qt's layer machinery entirely.
+4. **Presenting `GetAovTexture(color)`** — the task-context texture ping-pongs with
+   `colorIntermediate` and goes stale after picks; present the render buffer's
+   `GetResource(false)` texture instead.
+
+**Remaining for the production viewer:** text/HUD overlay on the Metal path (window-title
+HUD was used in the spike; production = QImage→`MTLTexture` quad or sibling Qt widget),
+`--two` shared-Hgi multi-view soak test, and the **Linux/HgiGL run** (direct render into
+`QOpenGLWidget`, no interop — expected to work, still unvalidated).
+
+*Diagnostics kept in the spike:* gated first-4-frame AOV/drawable readback logs, a
+30-frame health log (camera eye + AOV pixel count), and a **`d`-key dump** of the AOV and
+presented drawable to `/tmp/spike_{aov,drawable}.ppm` — these made the bisect possible and
+are worth keeping for M3 regression hunts.

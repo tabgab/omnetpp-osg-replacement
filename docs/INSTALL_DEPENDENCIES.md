@@ -144,10 +144,13 @@ OpenUSD 25.11** as verified against the installed headers.
 needs `DYLD_LIBRARY_PATH=$USD_ROOT/lib` (macOS) / `LD_LIBRARY_PATH=$USD_ROOT/lib` (Linux) — see
 §3. (Alternatively bake an absolute rpath at link time.)
 
-**Still requires an interactive GUI session (not done here):** the spike's *rendering* checklist
-— lit sphere via HgiMetal, `TestIntersection` picking, QPainter/QImage overlay, two-viewer
-shared-`Hgi` — needs a real display/Metal context. That run is the **M3 go/no-go gate** and
-should be done on the developer's desktop or a CI runner with a GPU/display.
+**Interactive validation (2026-06-11): the macOS render gate PASSED.** With the user driving
+the GUI and screenshots feeding an iterative debug loop, the spike now renders, picks, and
+orbits stably on this machine via the **Metal-native present** (HgiMetal → color AOV →
+`CAMetalLayer` sublayer; no OpenGL anywhere on the macOS path). The validated recipe and the
+verified dead-ends (GL interop present, `QWindow::MetalSurface`, task-context texture) are in
+`impl/spike/README.md` §6. Still pending elsewhere: the **Linux/WSL2 HgiGL** run (direct
+render into `QOpenGLWidget`, no interop — expected to work) and a `--two` multi-view soak test.
 
 ---
 
