@@ -1,0 +1,13 @@
+# Editor / OS noise
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Build artifacts (for when implementation lands here)
+build/
+out/
+*.o
+*.so
+*.dylib
