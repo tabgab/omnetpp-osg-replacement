@@ -60,6 +60,7 @@ In short:
 | [`docs/05-geospatial.md`](docs/05-geospatial.md) | The osgEarth replacement strategy (the hardest part): coordinate systems, terrain, annotations. |
 | [`docs/06-risks-and-decisions.md`](docs/06-risks-and-decisions.md) | Risk register with mitigations, honest fidelity gaps, and the open decisions needing sign-off. |
 | [`docs/07-plan-review.md`](docs/07-plan-review.md) | Adversarial review of the plan (Fable-model agent), verified against the real source tree; its findings are folded into the docs above. |
+| [`docs/INSTALL_DEPENDENCIES.md`](docs/INSTALL_DEPENDENCIES.md) | What to install to build/run the USD viewer (OpenUSD imaging, Qt6, PROJ) — written to fold into OMNeT++'s install process; removes the OSG/osgEarth deps. |
 
 ## Relationship to `omnetpp-usdenv`
 
