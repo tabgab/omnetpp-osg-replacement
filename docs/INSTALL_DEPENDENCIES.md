@@ -100,23 +100,54 @@ mirroring the existing `WITH_OSG`/`WITH_OSGEARTH` blocks (see
 
 ## 5. What was installed on this machine
 
-> Updated after the build completes (see `~/USD_build.log`).
+Recorded 2026-06-11 on this host (macOS 26.4.1, Apple Silicon arm64).
 
 - **Present already (no action):** Xcode CLT (Apple clang 21), Homebrew 5.1.14, CMake 4.0.3,
-  Python 3.12.1, git 2.50.0, **Qt 6.11.1** (Homebrew).
-- **Installed by this work:** OpenUSD — built from source to `~/USD` (monolithic, imaging,
-  Metal; `--no-python`). _Version/commit and exact lib paths recorded below once the build
-  finishes._
-- **Deferred (install when the milestone needs it):** PROJ 9.x (geospatial, M10); MaterialX
-  via a USD rebuild (`--materialx`, M9); osgVerse + Adobe `usdGLTF` for the `.osgb`→`.usd`
-  asset pipeline (M7, build-time tools only).
+  Python 3.12.1, git 2.50.0, **Qt 6.11.1** (Homebrew, at `/opt/homebrew/opt/qt`).
+- **Installed by this work:** OpenUSD **v25.11** (`PXR_VERSION 2511`, commit `363a7c8`) — built
+  from source to `~/USD`, monolithic, imaging on, **Metal (hgiMetal) present**, `--no-python`.
+  Build time ≈ 9 min on an M3-class machine. **MaterialX, OpenSubdiv and TBB were built in by
+  default** — so the M9 shader work does **not** need a USD rebuild after all.
+- **Deferred (install when the milestone needs it):** PROJ 9.x (geospatial, M10); osgVerse +
+  Adobe `usdGLTF` for the `.osgb`→`.usd` asset pipeline (M7, build-time tools only).
+  OpenImageIO is OFF in this build — add `--openimageio` later if exotic texture formats are
+  needed (PNG/JPG work via USD's built-in Hio).
 
 ```
-OpenUSD version : <filled in after build>
-Install prefix  : /Users/<user>/USD
-Key libs        : lib/libusd_ms.dylib ; plugin/usd ; bin/
-Qt              : /opt/homebrew (qt 6.11.1)
+OpenUSD version : v25.11  (PXR_VERSION 2511, commit 363a7c8)
+Install prefix  : /Users/gabortabi/USD            (~1.1 GB)
+Monolithic lib  : ~/USD/lib/libusd_ms.dylib       (68 MB)
+Imaging         : include/pxr/usdImaging/usdImagingGL/engine.h ; hgiMetal present
+Extras built in : MaterialX, OpenSubdiv, TBB
+CMake config    : ~/USD/pxrConfig.cmake           (find_package(pxr CONFIG))
+Tools           : ~/USD/bin (usdcat, usdchecker, usdtree, …)
+Qt              : /opt/homebrew/opt/qt            (qt 6.11.1)
 ```
+
+### Verified on this host
+The de-risking spike (`impl/spike/`) **configures, compiles, links, and loads** against this
+install — `cmake` found `pxr` + Qt6 and auto-selected the **macOS HgiMetal** path; the binary
+links `@rpath/libusd_ms.dylib` + the Qt frameworks; and `usd_qt_spike --help` runs (resolving
+every USD/Qt dylib at load and constructing `QApplication`) and exits 0. This validates the
+dependency set and the C++/CMake/runtime-link chain end to end.
+
+Three API-surface corrections were needed in the spike during this bring-up (now fixed and
+logged in `impl/spike/main.cpp`): (1) `pxr/base/gf/range2i.h` does not exist — `GfRange2i` is
+not a USD type (USD has `range{1,2,3}{d,f}` + `rect2i`); (2)/(3) missing Qt includes
+(`QtGui/QOpenGLContext`, `QtGui/QImage`, `QtGui/QFont`, `QtCore/QCommandLineOption`). Every
+other API assumption in the spike's deviation log (CreatePlatformDefaultHgi, HgiTokens,
+`Parameters::driver`, `SetPresentationOutput`/`SetFraming`/`SetRenderBufferSize`/
+`SetLightingState`/`TestIntersection`/`IsConverged`, `CameraUtilFraming(GfRect2i)`) **matches
+OpenUSD 25.11** as verified against the installed headers.
+
+**Runtime note for `setenv`:** the binary references `@rpath/libusd_ms.dylib`, so the loader
+needs `DYLD_LIBRARY_PATH=$USD_ROOT/lib` (macOS) / `LD_LIBRARY_PATH=$USD_ROOT/lib` (Linux) — see
+§3. (Alternatively bake an absolute rpath at link time.)
+
+**Still requires an interactive GUI session (not done here):** the spike's *rendering* checklist
+— lit sphere via HgiMetal, `TestIntersection` picking, QPainter/QImage overlay, two-viewer
+shared-`Hgi` — needs a real display/Metal context. That run is the **M3 go/no-go gate** and
+should be done on the developer's desktop or a CI runner with a GPU/display.
 
 ---
 

@@ -24,11 +24,15 @@
 #include <QtWidgets/QWidget>
 #include <QtOpenGLWidgets/QOpenGLWidget>
 #include <QtGui/QSurfaceFormat>
+#include <QtGui/QOpenGLContext>   // QOpenGLWidget::context() returns QOpenGLContext*
 #include <QtGui/QPainter>
+#include <QtGui/QImage>           // --safe-overlay (QImage-blit text path)
+#include <QtGui/QFont>
 #include <QtGui/QMouseEvent>
 #include <QtCore/QTimer>
 #include <QtCore/QDebug>
 #include <QtCore/QCommandLineParser>
+#include <QtCore/QCommandLineOption>
 #include <QtCore/QCoreApplication>
 
 // Standard library
@@ -66,7 +70,9 @@
 #include <pxr/base/gf/vec3d.h>
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/gf/vec2i.h>
-#include <pxr/base/gf/range2i.h>
+// NOTE: there is no GfRange2i in OpenUSD (only range{1,2,3}{d,f} + rect2i) — verified
+// against OpenUSD 25.11. CameraUtilFraming is built from a GfRect2i below, so rect2i.h
+// is all that's needed here.
 #include <pxr/base/gf/rect2i.h>   // GfRect2i (CameraUtilFraming framing rect)
 #include <pxr/base/vt/value.h>
 

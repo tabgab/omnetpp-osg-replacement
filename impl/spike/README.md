@@ -202,23 +202,33 @@ critical path for M3.
 
 ---
 
-## 6. API deviation log (fill in after running)
+## 6. API deviation log (build/link verified 2026-06-11 vs OpenUSD 25.11)
 
-Record any deviations from the OpenUSD 25.11 API surface assumed during
-development.  This section gates the M3 milestone decision.
+**Status:** the spike **configures, compiles, links, and loads** against OpenUSD **v25.11**
+(`PXR_VERSION 2511`) + Qt 6.11.1 on macOS arm64 (CMake auto-selected the HgiMetal path).
+Every compile-time API assumption below is therefore confirmed present with the assumed
+signature — a wrong member/signature would have failed the build. Items marked
+*runtime-pending* compile correctly but their behaviour is only confirmed by an interactive
+render run (the **M3 gate**, which needs a display/Metal context — not done in the headless
+bring-up).
 
-| Assumed API | Actual API (25.11) | Notes |
-|-------------|-------------------|-------|
-| `UsdImagingGLEngine::Parameters::driver` member | *to be verified* | Fallback: use `UsdImagingGLEngine(const HdDriver&, ...)` constructor overload |
-| `Hgi::CreatePlatformDefaultHgi()` | *to be verified* | May be `Hgi::GetPlatformDefaultHgi()` or factory function in some builds |
-| `HgiTokens->renderDriver` | *to be verified* | Check `pxr/imaging/hgi/tokens.h` |
-| `HgiTokens->OpenGL` (present output token) | *to be verified* | May be `TfToken("OpenGL")` if not in tokens.h |
-| `engine->GetCurrentRendererId()` | *to be verified* | Returns `TfToken`; may differ in name |
-| `GlfSimpleLight::SetPosition(GfVec4f)` | *to be verified* | Check `pxr/imaging/glf/simpleLight.h` |
-| `CameraUtilFraming(GfRect2i(...))` | *to be verified* | Constructor signature in `cameraUtil/framing.h` |
-| `GfFrustum::ComputeNarrowedFrustum(GfVec2d, GfVec2d)` | *to be verified* | Check parameter types in `gf/frustum.h` |
-| `engine->TestIntersection(view, proj, root, rp, &pt, &nrm, &path, &instPath, &instIdx)` | *to be verified* | Signature in `usdImagingGL/engine.h` |
+| Assumed API | Status vs 25.11 | Notes |
+|-------------|-----------------|-------|
+| `UsdImagingGLEngine::Parameters::driver` | ✅ confirmed | engine.h: `HdDriver driver;` |
+| `Hgi::CreatePlatformDefaultHgi()` | ✅ confirmed | hgi.h: `static HgiUniquePtr CreatePlatformDefaultHgi();` |
+| `HgiTokens->renderDriver` | ✅ confirmed | hgi/tokens.h |
+| `SetPresentationOutput(TfToken, VtValue)` | ✅ confirmed | engine.h:539 |
+| `GlfSimpleLight` + `SetLightingState(...)` | ✅ compiles · runtime-pending | two overloads present (engine.h:262/269) |
+| `CameraUtilFraming(GfRect2i(...))` | ✅ confirmed | explicit GfRect2i ctor — **`GfRange2i` does NOT exist** (USD has range{1,2,3}{d,f} + rect2i) |
+| `GfFrustum::ComputeNarrowedFrustum(...)` | ✅ compiles · runtime-pending | accepted by 25.11 |
+| `TestIntersection(...)` | ✅ compiles · runtime-pending | present (engine.h:328/379); resolveDeep behaviour pending render |
+| `IsConverged()` / `SetFraming` / `SetRenderBufferSize` | ✅ confirmed | engine.h:177/210/229 |
 
-**Overlay mode result:**
+**Build-time fixes applied during bring-up (committed):**
+- Removed `#include <pxr/base/gf/range2i.h>` — no such header/type; the framing uses `GfRect2i`.
+- Added Qt includes: `QtGui/QOpenGLContext`, `QtGui/QImage`, `QtGui/QFont`, `QtCore/QCommandLineOption`.
+
+**Runtime-pending (needs a display/GPU — the M3 go/no-go run):** the §4 success checklist
+(lit sphere via HgiMetal/HgiGL, picking → SdfPath, overlay text, two-viewer shared-Hgi) and:
 - Linux: [ ] direct QPainter clean  /  [ ] requires --safe-overlay
 - macOS: [ ] direct QPainter clean  /  [ ] requires --safe-overlay
