@@ -49,6 +49,20 @@ orbiter), updates it from the `tokenHop` signal, hands it over via
    GNU extensions on strict compilers).
 3. Sample binaries get the USD rpath via `USD_LIBS`, so no `DYLD_LIBRARY_PATH` is needed.
 
+## DEMO VERIFIED (2026-06-11, user-confirmed screenshot)
+
+The `usd-intro` simulation **renders and runs live in Qtenv on macOS**: ground plane,
+4 ring nodes with the active node recolored green on token arrival, yellow token sphere,
+red sim-time-driven orbiter — all updating while the simulation executes (confirmed at
+event #2907, t=581s). 3D picking selects the bound `TokenNode` modules (reliability
+improved post-demo by widening the pick window from 1px to 6px — Risk R2 behavior).
+
+**Additional USD 25.11 gotcha discovered:** `UsdImagingGLEngine::GetHgi()` returns
+**null** when the Hgi is supplied via `HdDriver` — the presenter must keep its own
+reference to the shared Hgi. (Found via qInfo breadcrumbs; qDebug is compiled out in
+release Qtenv builds, and Qtenv appears to swallow qWarning — use qInfo for plugin
+diagnostics.)
+
 ## Known transitional limitations
 
 - `configure.in` not yet regenerated — `Makefile.inc`/`config.h` are hand-edited (M1's

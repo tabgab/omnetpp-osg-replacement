@@ -74,6 +74,8 @@ struct MetalPresenter {
     id<MTLDevice>              device   = nil;
     id<MTLCommandQueue>        queue    = nil;
     id<MTLRenderPipelineState> pipeline = nil;
+    HgiMetal                  *hgiMetal = nullptr;  // the shared Hgi (engine->GetHgi()
+                                                    // returns null for driver-provided Hgis in 25.11)
 };
 
 static void updateLayerGeometry(MetalPresenter *p, QWidget *host)
@@ -90,19 +92,27 @@ static void updateLayerGeometry(MetalPresenter *p, QWidget *host)
 
 void *createPresenter(QWidget *host, Hgi *hgi)
 {
-    HgiMetal *hgiMetal = dynamic_cast<HgiMetal *>(hgi);
-    if (!hgiMetal) {
-        qWarning() << "usdmetal: Hgi is not HgiMetal — cannot present";
+    // NOTE: static_cast after a name check, NOT dynamic_cast — RTTI across the
+    // dlopen'd plugin / usd_ms boundary is unreliable (the spike validated the
+    // static_cast pattern).
+    qInfo() << "usdmetal: createPresenter, hgi:" << (void*)hgi
+            << "api:" << (hgi ? hgi->GetAPIName().GetText() : "(null)");
+    if (!hgi || hgi->GetAPIName() != HgiTokens->Metal) {
+        qInfo() << "usdmetal: Hgi backend is not Metal - cannot present";
         return nullptr;
     }
+    HgiMetal *hgiMetal = static_cast<HgiMetal *>(hgi);
 
     auto *p = new MetalPresenter;
+    p->hgiMetal = hgiMetal;
     p->device = hgiMetal->GetPrimaryDevice();
     p->queue  = hgiMetal->GetQueue();
+    qInfo() << "usdmetal: device" << (__bridge void*)p->device << "queue" << (__bridge void*)p->queue;
 
     // CAMetalLayer as a SUBLAYER of the host's backing layer; never replace
     // or reuse Qt's own layer (verified crash in QNSView displayLayer:).
     NSView *view = (__bridge NSView *)reinterpret_cast<void *>(host->winId());
+    qInfo() << "usdmetal: host NSView" << (__bridge void*)view;
     view.wantsLayer = YES;
     p->layer = [CAMetalLayer layer];
     p->layer.device = p->device;
@@ -114,11 +124,13 @@ void *createPresenter(QWidget *host, Hgi *hgi)
         view.layer = p->layer;
         view.wantsLayer = YES;
     }
+    qInfo() << "usdmetal: layer attached:" << (p->layer.superlayer != nil);
 
     NSError *err = nil;
     id<MTLLibrary> lib = [p->device newLibraryWithSource:@(kPresentMSL) options:nil error:&err];
     if (!lib) {
-        qWarning() << "usdmetal: MSL compile failed:" << err.localizedDescription.UTF8String;
+        qInfo() << "usdmetal: MSL compile failed:"
+                << (err ? err.localizedDescription.UTF8String : "(no error info)");
         delete p;
         return nullptr;
     }
@@ -128,12 +140,14 @@ void *createPresenter(QWidget *host, Hgi *hgi)
     d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
     p->pipeline = [p->device newRenderPipelineStateWithDescriptor:d error:&err];
     if (!p->pipeline) {
-        qWarning() << "usdmetal: pipeline failed:" << err.localizedDescription.UTF8String;
+        qInfo() << "usdmetal: pipeline failed:"
+                << (err ? err.localizedDescription.UTF8String : "(no error info)");
         delete p;
         return nullptr;
     }
 
     updateLayerGeometry(p, host);
+    qInfo() << "usdmetal: presenter ready";
     return p;
 }
 
@@ -149,16 +163,20 @@ void present(void *pv, UsdImagingGLEngine *engine, QWidget *host)
     if (!p || !p->layer || !engine)
         return;
 
-    HgiMetal *hgiMetal = dynamic_cast<HgiMetal *>(engine->GetHgi());
+    HgiMetal *hgiMetal = p->hgiMetal;   // stored at creation; do NOT use engine->GetHgi()
     if (!hgiMetal)
         return;
 
     // Flush Hydra's pending Metal work before touching the AOV.
     hgiMetal->CommitPrimaryCommandBuffer(HgiMetal::CommitCommandBuffer_WaitUntilCompleted);
 
+    static int diagBudget = 8;   // a few release-visible diagnostics, then quiet
+
     HdRenderBuffer *colorRb = engine->GetAovRenderBuffer(HdAovTokens->color);
-    if (!colorRb)
+    if (!colorRb) {
+        if (diagBudget > 0) { --diagBudget; qWarning() << "usdmetal: no color render buffer"; }
         return;
+    }
     colorRb->Resolve();
 
     // SYNCHRONIZING READBACK — load-bearing, do not remove (see file header).
@@ -172,17 +190,28 @@ void present(void *pv, UsdImagingGLEngine *engine, QWidget *host)
         colorH = res.UncheckedGet<HgiTextureHandle>();
     if (!colorH)
         colorH = engine->GetAovTexture(HdAovTokens->color);  // fallback
-    if (!colorH)
+    if (!colorH) {
+        if (diagBudget > 0) { --diagBudget; qWarning() << "usdmetal: no color AOV texture"; }
         return;
+    }
     id<MTLTexture> srcTex =
         (__bridge id<MTLTexture>)reinterpret_cast<void *>(colorH->GetRawResource());
-    if (!srcTex)
+    if (!srcTex) {
+        if (diagBudget > 0) { --diagBudget; qWarning() << "usdmetal: null MTLTexture"; }
         return;
+    }
 
     updateLayerGeometry(p, host);
     id<CAMetalDrawable> drawable = [p->layer nextDrawable];
-    if (!drawable)
+    if (!drawable) {
+        if (diagBudget > 0) { --diagBudget; qWarning() << "usdmetal: nextDrawable nil (layer "
+            << (p->layer.superlayer ? "attached" : "DETACHED") << ")"; }
         return;
+    }
+    if (diagBudget > 0) { --diagBudget;
+        qInfo() << "usdmetal: presenting" << int(p->layer.drawableSize.width) << "x"
+                << int(p->layer.drawableSize.height)
+                << "layer" << (p->layer.superlayer ? "attached" : "DETACHED"); }
 
     id<MTLCommandBuffer> cb = [p->queue commandBuffer];
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];

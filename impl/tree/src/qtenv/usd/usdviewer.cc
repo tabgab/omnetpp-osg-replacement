@@ -75,8 +75,8 @@ static Hgi *ensureSharedHgi()
         s_hgi = Hgi::CreatePlatformDefaultHgi();
         if (s_hgi) {
             s_driver = HdDriver{ HgiTokens->renderDriver, VtValue(s_hgi.get()) };
-            qDebug() << "UsdViewer: shared Hgi created:"
-                     << QString::fromStdString(s_hgi->GetAPIName());
+            qInfo() << "UsdViewer: shared Hgi created:"
+                    << QString::fromStdString(s_hgi->GetAPIName());
         }
     }
     return s_hgi.get();
@@ -147,8 +147,8 @@ void UsdViewer::ensureEngine()
     engine->SetEnablePresentation(false);
     engine->SetRendererAov(HdAovTokens->color);
 #endif
-    qDebug() << "UsdViewer: engine renderer:"
-             << QString::fromStdString(engine->GetCurrentRendererId().GetString());
+    qInfo() << "UsdViewer: engine renderer:"
+            << QString::fromStdString(engine->GetCurrentRendererId().GetString());
 }
 
 void UsdViewer::setOsgCanvas(cOsgCanvas *canvas)
@@ -243,15 +243,22 @@ void UsdViewer::configureFrame(int pw, int ph)
 
 void UsdViewer::renderNow()
 {
+    static int diagBudget = 8;   // a few release-visible diagnostics, then quiet
     cScene3DNode *handle = sceneHandle();
-    if (!handle || !handle->getStage())
+    if (!handle || !handle->getStage()) {
+        if (diagBudget > 0) { --diagBudget;
+            qInfo() << "UsdViewer: no scene handle/stage yet (canvas:" << (void*)osgCanvas
+                    << "handle:" << (void*)handle << ")"; }
         return;
+    }
     ensureEngine();
-    if (!engine)
+    if (!engine) {
+        if (diagBudget > 0) { --diagBudget; qInfo() << "UsdViewer: no engine"; }
         return;
+    }
 
 #ifdef Q_OS_MAC
-    if (!isVisible())
+    if (width() <= 0 || height() <= 0)
         return;
     const qreal dpr = devicePixelRatioF();
     const int pw = std::max(1, int(width() * dpr));
@@ -266,8 +273,13 @@ void UsdViewer::renderNow()
     rp.enableLighting = true;
     engine->Render(handle->getStage()->GetPseudoRoot(), rp);
 
-    if (!presenter)
-        presenter = usdmetal::createPresenter(metalHost, engine->GetHgi());
+    if (!presenter) {
+        // pass the shared Hgi directly: engine->GetHgi() returns null for
+        // driver-provided Hgis in OpenUSD 25.11
+        presenter = usdmetal::createPresenter(metalHost, s_hgi.get());
+        qInfo() << "UsdViewer: Metal presenter" << (presenter ? "created" : "FAILED")
+                << "host size" << metalHost->width() << "x" << metalHost->height();
+    }
     if (presenter)
         usdmetal::present(presenter, engine, metalHost);
 #else
@@ -348,8 +360,10 @@ std::vector<cObject *> UsdViewer::objectsAt(const QPoint& pos)
 
     GfFrustum pickFrustum = lastFrustum;
     pickFrustum.Transform(lastViewMatrix.GetInverse());
+    // ~6px pick window: a 1px window makes picking feel unreliable with the
+    // ID-pass-based TestIntersection (Risk R2)
     GfFrustum narrowed = pickFrustum.ComputeNarrowedFrustum(
-        GfVec2d(ndcX, ndcY), GfVec2d(1.0 / w, 1.0 / h));
+        GfVec2d(ndcX, ndcY), GfVec2d(6.0 / w, 6.0 / h));
 
     GfVec3d hitPoint, hitNormal;
     SdfPath hitPrimPath, hitInstancerPath;

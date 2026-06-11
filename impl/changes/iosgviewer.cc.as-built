@@ -1,0 +1,171 @@
+//==========================================================================
+//  IOSGVIEWER.CC - part of
+//
+//                     OMNeT++/OMNEST
+//            Discrete System Simulation in C++
+//
+//==========================================================================
+
+/*--------------------------------------------------------------*
+  Copyright (C) 1992-2017 Andras Varga
+  Copyright (C) 2006-2017 OpenSim Ltd.
+
+  This file is distributed WITHOUT ANY WARRANTY. See the file
+  `license' for details on this and other legal matters.
+*--------------------------------------------------------------*/
+
+#include <iostream>
+#include "iosgviewer.h"
+#include "envir/fsutils.h"
+#include "common/ver.h"
+#include <QtWidgets/QToolBar>
+#include <QtWidgets/QGridLayout>
+
+#ifndef _WIN32
+#include <dlfcn.h>   // dladdr: locate the lib dir of this (qtenv) library
+#endif
+
+namespace omnetpp {
+namespace qtenv {
+
+// the osg implementation library will set this pointer to a real factory in it
+QTENV_API IOsgViewerFactory *osgViewerFactory = nullptr;
+
+class DummyOsgViewerFactory: public IOsgViewerFactory
+{
+public:
+    virtual IOsgViewer *createViewer() { return new DummyOsgViewer(); }
+    virtual void shutdown() {}
+
+    virtual void refNode(osg::Node *) {}
+    virtual void unrefNode(osg::Node *) {}
+};
+
+DummyOsgViewerFactory dummyOsgFactory;
+
+void IOsgViewer::ensureViewerFactory()
+{
+    if (!osgViewerFactory) {
+        osgViewerFactory = &dummyOsgFactory;
+
+        std::cout << "Loading 3D Viewer library... " << std::endl;
+
+        // The backend libs live next to this (liboppqtenv) library; a bare
+        // dlopen name is not found there unless (DY)LD_LIBRARY_PATH happens to
+        // include the lib dir, so resolve our own directory via dladdr and try
+        // the absolute path too.
+        std::string libDir;
+#ifndef _WIN32
+        Dl_info info;
+        if (dladdr((void *)&osgViewerFactory, &info) && info.dli_fname) {
+            std::string self = info.dli_fname;
+            size_t slash = self.rfind('/');
+            if (slash != std::string::npos)
+                libDir = self.substr(0, slash);
+        }
+#endif
+
+        // Prefer the OpenUSD backend; fall back to the legacy OSG backend,
+        // then to the dummy viewer. Loading a backend library makes its
+        // factory self-register by overwriting osgViewerFactory.
+        for (const char *libName : { "oppqtenv-usd", "oppqtenv-osg" }) {
+            for (const std::string& candidate : { std::string(libName),
+                                                  libDir.empty() ? std::string() : libDir + "/" + libName }) {
+                if (candidate.empty())
+                    continue;
+                try {
+                    loadExtensionLibrary(candidate.c_str());
+                }
+                catch (cRuntimeError& e) {
+                    std::cout << "  " << candidate << ": " << e.what() << std::endl;
+                }
+                if (osgViewerFactory != &dummyOsgFactory)
+                    break;
+            }
+            if (osgViewerFactory != &dummyOsgFactory) {
+                std::cout << "Loaded 3D viewer backend: " << libName << std::endl;
+                break;
+            }
+        }
+
+        std::cout << std::endl;
+
+        /*
+        // Not throwing an exception here, because that will take the simulation into an "ERROR"
+        // state, and will not let it continue - even though it could - , but after rebuilding the
+        // network, it will.
+        // And not showing a dialog at all because then it could get annoying when the user
+        // doesn't have/want/care about 3D at all, but the model (INET with the 3D visualizations
+        // for example) creates a cOsgCanvas - which is possible now. And it won't be a dummy
+        // implementation anymore. And the dummy viewer will show an error anyways.
+        if (osgViewerFactory == &dummyOsgFactory)
+            getQtenv()->confirm(Qtenv::WARNING,
+                                "Could not load the OSG viewer library (qtenv-osg).\n"
+                                "Continuing without the ability to view the scenes of cOsgCanvas objects.\n"
+                                "(Is " OMNETPP_PRODUCT " compiled with OSG support enabled?)");
+        */
+    }
+}
+
+IOsgViewer *IOsgViewer::createOne()
+{
+    ensureViewerFactory();
+
+    IOsgViewer *viewer = osgViewerFactory->createViewer();
+
+    if (!viewer)
+        throw cRuntimeError("Could not create OsgViewer.");
+
+    return viewer;
+}
+
+void IOsgViewer::uninit()
+{
+    // if no viewers were created (so the impl. lib. is not loaded), then no-op
+    if (osgViewerFactory)
+        osgViewerFactory->shutdown();
+}
+
+void IOsgViewer::refNode(osg::Node *node)
+{
+    ensureViewerFactory();
+
+    osgViewerFactory->refNode(node);
+}
+
+void IOsgViewer::unrefNode(osg::Node *node)
+{
+    ensureViewerFactory();
+
+    osgViewerFactory->unrefNode(node);
+}
+
+bool IOsgViewer::isOsgPreferred()
+{
+    return osgViewerFactory != nullptr && osgViewerFactory != &dummyOsgFactory;
+}
+
+void DummyOsgViewer::paintEvent(QPaintEvent *)
+{
+    QPainter painter(this);
+
+    QRect rect({0, 0}, size());
+
+    QPalette pal = palette();
+    pal.setCurrentColorGroup(QPalette::Disabled);
+
+    painter.fillRect(rect, pal.window());
+
+    painter.setPen(QPen(pal.text().color()));
+    painter.drawText(rect.adjusted(50, 50, -50, -50), // so the toolbar won't ob
+                     "The OSG Viewer library could not be loaded.\n"
+                     "(Was " OMNETPP_PRODUCT " compiled with OSG support enabled?)");
+}
+
+void DummyOsgViewer::setFloatingToolbar(QToolBar *toolbar)
+{
+    ((QGridLayout *)layout())->addWidget(toolbar, 0, 0, Qt::AlignRight | Qt::AlignTop);
+}
+
+} // qtenv
+} // omnetpp
