@@ -25,6 +25,7 @@
 #include <QtOpenGLWidgets/QOpenGLWidget>
 #include <QtGui/QSurfaceFormat>
 #include <QtGui/QOpenGLContext>   // QOpenGLWidget::context() returns QOpenGLContext*
+#include <QtGui/QOpenGLFunctions> // raw GL for the R3 present-path bisect diagnostic
 #include <QtGui/QPainter>
 #include <QtGui/QImage>           // --safe-overlay (QImage-blit text path)
 #include <QtGui/QFont>
@@ -280,6 +281,20 @@ protected:
         if (!m_engine || !m_stage)
             return;
 
+        // --- R3 present-path BISECT DIAGNOSTIC ------------------------------
+        // Clear the widget's framebuffer to magenta with raw GL *before* Hydra
+        // renders. Outcome on screen tells us which layer fails:
+        //   • scene visible   -> Metal->GL interop works (problem elsewhere)
+        //   • magenta window  -> QOpenGLWidget present works; Hydra's interop is
+        //                        NOT compositing into this FBO  (the suspected bug)
+        //   • black window     -> GL output never reaches the screen
+        //                        (QOpenGLWidget/context issue, not Hydra)
+        if (auto *glf = QOpenGLContext::currentContext()->functions()) {
+            glf->glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
+            glf->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        }
+        // --------------------------------------------------------------------
+
         const qreal dpr = devicePixelRatioF();
         const int w = width();
         const int h = height();
@@ -341,6 +356,15 @@ protected:
         rp.enableLighting  = true;
 
         m_engine->Render(m_stage->GetPseudoRoot(), rp);
+
+        // [diag] surface any GL error left by the interop/composite step.
+        if (auto *glf = QOpenGLContext::currentContext()->functions()) {
+            GLenum err = glf->glGetError();
+            if (err != 0)
+                qWarning() << "[diag] GL error after Render: 0x" + QString::number(err, 16);
+            qInfo() << "[diag] presented into FBO" << defaultFramebufferObject()
+                    << "converged:" << m_engine->IsConverged();
+        }
 
         // 7. Text overlay.
         //    Hydra/HgiGL can leave GL pixel-transfer state (pack/unpack alignment,

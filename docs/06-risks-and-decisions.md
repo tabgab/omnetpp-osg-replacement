@@ -33,6 +33,20 @@ acceptable for a sim tool.
 **Mitigation:** a throwaway Qt + `UsdImagingGLEngine` spike on **both Linux/GL and macOS/Metal**
 before M3; GL-version/backend check at construction; `QT_NO_KEYWORDS` in the plugin build.
 
+**SPIKE RESULT (2026-06-11, macOS arm64, OpenUSD 25.11, Qt 6.11.1) — R3 substantially de-risked
+and one dead-end found:** HgiMetal + Storm initialize, Z-up scene authoring works, **picking
+(`TestIntersection`→`SdfPath`) works**, and the **QPainter HUD overlay is clean over GL** (no
+`--safe-overlay` needed). **But Hydra's HgiMetal output is NOT composited into the
+`QOpenGLWidget` FBO** (a magenta-clear bisect proved the widget presents and the overlay draws,
+yet the Hydra image never lands). → **Refined decision (supersedes "HgiMetal + hgiInterop into a
+QOpenGLWidget"): on macOS the viewer presents via Metal directly** — a `QRhiWidget` with the
+Metal backend (Qt 6.7+) or a `CAMetalLayer`-backed `QWindow` — composing Hydra's HgiMetal color
+texture in Metal, with **no GL↔Metal interop**. Still open: implement that Metal present (spike +
+then the Qtenv viewer), and validate the **Linux** path (HgiGL renders *directly* into the
+`QOpenGLWidget`, no interop — expected to work but untested). The overlay-corruption concern
+(former bullet 2) looks benign on macOS over GL content, but must be re-checked over real Hydra
+output once the present works.
+
 ### R4 — Per-frame attribute re-author performance — **MEDIUM**
 USD writes whole arrays. INET mutates trail/ring vertices and sphere radii each tick.
 **Mitigation:** author at `UsdTimeCode::Default()` and **overwrite** (single value — no

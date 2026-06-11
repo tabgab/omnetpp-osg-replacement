@@ -228,7 +228,27 @@ bring-up).
 - Removed `#include <pxr/base/gf/range2i.h>` — no such header/type; the framing uses `GfRect2i`.
 - Added Qt includes: `QtGui/QOpenGLContext`, `QtGui/QImage`, `QtGui/QFont`, `QtCore/QCommandLineOption`.
 
-**Runtime-pending (needs a display/GPU — the M3 go/no-go run):** the §4 success checklist
-(lit sphere via HgiMetal/HgiGL, picking → SdfPath, overlay text, two-viewer shared-Hgi) and:
-- Linux: [ ] direct QPainter clean  /  [ ] requires --safe-overlay
-- macOS: [ ] direct QPainter clean  /  [ ] requires --safe-overlay
+### Runtime results — macOS (2026-06-11, Apple Silicon, OpenUSD 25.11, Qt 6.11.1)
+
+First interactive run + a magenta-clear bisect diagnostic established:
+
+| Check | Result |
+|---|---|
+| HgiMetal backend selected | ✅ `Shared Hgi created: "Metal"` |
+| Storm render delegate | ✅ `HdStormRendererPlugin` |
+| GL context | 4.1 CoreProfile (macOS max — why HgiGL is unusable here) |
+| Scene authoring (Z-up sphere) | ✅ (picking ray-tests hit real geometry) |
+| **Picking → SdfPath** | ✅ `Hit: /World/Sphere` with correct world coords (validates the `cObjectOsgNode`→`SdfPath` replacement on Metal) |
+| QPainter HUD overlay over GL | ✅ clean, no `--safe-overlay` needed (over a GL clear) |
+| **Hydra image presented to the `QOpenGLWidget`** | ❌ **black/absent** — magenta-clear bisect shows the widget FBO presents (magenta visible) but Hydra's **Metal→GL interop does not composite** into it |
+
+**Confirmed R3 root cause:** `QOpenGLWidget` uses a non-zero internal FBO; USD's HgiMetal→OpenGL
+interop (`SetPresentationOutput(HgiTokens->OpenGL, defaultFramebufferObject())`) does not land
+its output there. **Fix / decision:** on macOS the viewer must present via **Metal** — a
+`QRhiWidget` with the Metal backend (Qt 6.7+) or a `CAMetalLayer`-backed `QWindow` — so Hydra's
+HgiMetal color texture is composited in Metal with **no GL interop**. (Linux: HgiGL renders
+*directly* into the `QOpenGLWidget`, no interop — expected to work, still to be validated on a
+Linux/WSL run.)
+
+*Note:* the magenta `glClear` in `paintGL` is a temporary bisect diagnostic; it will be removed
+when the macOS Metal present path is implemented.

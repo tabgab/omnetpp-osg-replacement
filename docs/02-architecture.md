@@ -153,12 +153,21 @@ Hydra 2 the default, the scene-index path is transparent to this surface.
 ### Per-platform Hgi backend (Decision D6 — review fix)
 HgiGL requires **OpenGL ≥ 4.5**. **macOS caps OpenGL at 4.1**, so a "fall back to Dummy if
 < 4.5" rule would disable 3D on every Mac. Instead:
-- **Linux / Windows:** Storm + **HgiGL** (require GL ≥ 4.5).
-- **macOS:** Storm + **HgiMetal** with **hgiInterop** to composite the Metal output into the
-  `QOpenGLWidget`'s GL FBO (the path `usdview` uses on macOS). The build must include the
-  `hgiMetal` library on macOS.
+- **Linux (and Windows-via-WSL):** Storm + **HgiGL** (require GL ≥ 4.5), rendering *directly*
+  into a `QOpenGLWidget` — no interop.
+- **macOS:** Storm + **HgiMetal**, presenting via a **Metal-backed surface** — a `QRhiWidget`
+  (Qt 6.7+) with the Metal backend, or a `CAMetalLayer`-backed `QWindow` — compositing Hydra's
+  HgiMetal color texture in Metal, with **no GL↔Metal interop**. The build must include the
+  `hgiMetal` library. *(Updated 2026-06-11 from the spike: the earlier "HgiMetal + hgiInterop
+  into a `QOpenGLWidget` GL FBO" path was tried and **does not present** on macOS — see Risk R3.
+  Picking and the QPainter overlay work; only the GL-interop present fails, hence the Metal
+  surface.)*
 - Select the backend at `UsdViewer` construction; only fall back to `DummyViewer` if no
   suitable backend is available.
+
+> **Implication:** on macOS the viewer widget is **not** a `QOpenGLWidget` (it's a Metal-backed
+> `QRhiWidget`/`QWindow`). The per-platform widget base is therefore a compile-time choice in
+> `oppqtenv-usd`. This is a refinement to M3 surfaced by the de-risking spike.
 
 ### Shared GL context (review fix)
 Sharing one `Hgi`/`HdDriver` across multiple 3D inspectors requires
