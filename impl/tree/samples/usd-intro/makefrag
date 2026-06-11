@@ -1,0 +1,7 @@
+# OpenUSD authoring support for this sample (model-side USD usage).
+# USD_CFLAGS/USD_LIBS/USD_ROOT come from Makefile.inc (WITH_USD block).
+# -isystem suppresses non-downgradable clang diagnostics inside USD/TBB headers.
+# usdscenehandle.h (the cScene3DNode completion for the USD backend) comes from
+# the oppqtenv-usd plugin source dir until it gets a public install location.
+COPTS += $(USD_CFLAGS) -I$(OMNETPP_ROOT)/src/qtenv/usd -std=gnu++17
+LIBS += $(USD_LIBS)

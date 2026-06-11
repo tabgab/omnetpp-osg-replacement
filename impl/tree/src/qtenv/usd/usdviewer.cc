@@ -14,256 +14,438 @@
   `license' for details on this and other legal matters.
 *--------------------------------------------------------------*/
 
-// ---------------------------------------------------------------------------
-// How this library hooks into Qtenv
-// ---------------------------------------------------------------------------
-// This file is compiled into liboppqtenv-usd.so (or .dylib / .dll), which is
-// loaded at runtime via:
-//
-//   loadExtensionLibrary("oppqtenv-usd")
-//
-// in IOsgViewer::ensureViewerFactory() (iosgviewer.cc).  The global
-// usdViewerFactoryInstance object below runs its constructor as soon as the
-// dynamic library is mapped into the process, which overwrites the
-// osgViewerFactory global (defined in iosgviewer.cc line 28) with a pointer
-// to UsdViewerFactory.  This is the same self-registration mechanism used by
-// the OSG plugin (RealOsgViewerFactory in osgviewer.cc lines 52-72).
-//
-// A side-effect of osgViewerFactory being non-null and non-DummyFactory is
-// that IOsgViewer::isOsgPreferred() (iosgviewer.cc line 110) returns true,
-// so 3D module inspectors open in 3D mode by default.
-// ---------------------------------------------------------------------------
-
 #include "usdviewer.h"
-#include "stagecache.h"        // M3: StageCache owns UsdStage per cOsgCanvas
+#include "usdscenehandle.h"
 
-#include <QtGui/QPainter>
-#include <QtGui/QPalette>
+#include "omnetpp/cosgcanvas.h"
+#include "omnetpp/cobject.h"
+
+#include <QtWidgets/QToolBar>
 #include <QtWidgets/QGridLayout>
+#include <QtGui/QMouseEvent>
+#include <QtGui/QWheelEvent>
+#include <QtCore/QDebug>
+
+#include <pxr/usd/usd/stage.h>
+#include <pxr/usd/usd/prim.h>
+#include <pxr/usdImaging/usdImagingGL/engine.h>
+#include <pxr/usdImaging/usdImagingGL/renderParams.h>
+#include <pxr/imaging/hgi/hgi.h>
+#include <pxr/imaging/hgi/tokens.h>
+#include <pxr/imaging/hd/driver.h>
+#include <pxr/imaging/hd/tokens.h>
+#include <pxr/imaging/glf/simpleLight.h>
+#include <pxr/imaging/glf/simpleMaterial.h>
+#include <pxr/imaging/cameraUtil/framing.h>
+#include <pxr/base/gf/vec4f.h>
+#include <pxr/base/gf/vec2i.h>
+#include <pxr/base/gf/rect2i.h>
+#include <pxr/base/vt/value.h>
+
+#include <cmath>
+#include <memory>
+
+PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace omnetpp {
 namespace qtenv {
 
-// ---------------------------------------------------------------------------
-// Factory — mirrors RealOsgViewerFactory in osgviewer.cc lines 52-72
-// ---------------------------------------------------------------------------
-
-// The global osgViewerFactory pointer lives in iosgviewer.cc; we reference it
-// here exactly as osgviewer.cc does (extern declaration, not a redefinition).
+// defined in iosgviewer.cc; the loaded backend library points it at its factory
 extern QTENV_API IOsgViewerFactory *osgViewerFactory;
 
-/**
- * Self-registering factory for UsdViewer.
- *
- * The global usdViewerFactoryInstance object (at the bottom of this file)
- * is constructed when the oppqtenv-usd library is loaded, which sets
- * osgViewerFactory to this instance, replacing the DummyOsgViewerFactory.
- */
-class UsdViewerFactory : public IOsgViewerFactory
-{
-  public:
-    UsdViewerFactory()
-    {
-        // Runs when the library is loaded because of the global
-        // usdViewerFactoryInstance object.  Overwrites the dummy factory,
-        // making IOsgViewer::isOsgPreferred() return true.
-        osgViewerFactory = this;
-    }
-
-    IOsgViewer *createViewer() override
-    {
-        return new UsdViewer();
-    }
-
-    void shutdown() override
-    {
-        UsdViewer::uninit();
-    }
-
-    // The USD rendering path never materialises osg::Node objects in the
-    // host process, so ref/unref are no-ops here.
-    // cOsgCanvas ref-counting for USD scene handles is defined in M4
-    // (StageCache owns the UsdStage; it uses a separate ref-count mechanism
-    // based on cOsgCanvas pointer identity, not osg::Node intrusive ref-count).
-    void refNode(osg::Node *) override {}
-    void unrefNode(osg::Node *) override {}
-};
-
-// Global instance — construction triggers the self-registration above.
-UsdViewerFactory usdViewerFactoryInstance;
-
+#ifdef Q_OS_MAC
+// Metal-native presenter, implemented in usdpresent_metal.mm (spike recipe).
+namespace usdmetal {
+void *createPresenter(QWidget *host, PXR_NS::Hgi *hgi);
+void resizePresenter(void *p, QWidget *host);
+void present(void *p, PXR_NS::UsdImagingGLEngine *engine, QWidget *host);
+void destroyPresenter(void *p);
+}
+#endif
 
 // ---------------------------------------------------------------------------
-// UsdViewer implementation
+// Shared Hgi/driver — one per process, shared by all UsdViewer instances.
 // ---------------------------------------------------------------------------
+static std::unique_ptr<Hgi> s_hgi;
+static HdDriver s_driver;
 
-UsdViewer::UsdViewer(QWidget *parent)
-    : IOsgViewer(parent)
+static Hgi *ensureSharedHgi()
 {
-    // Install a QGridLayout so setFloatingToolbar() can position the toolbar.
-    // Mirrors DummyOsgViewer constructor (iosgviewer.h lines 105-112) and
-    // OsgViewer constructor (osgviewer.cc lines 345-350).
-    new QGridLayout(this);
-
-    const int toolbarSpacing = 4; // pixels from the widget edges
-    layout()->setContentsMargins(toolbarSpacing, toolbarSpacing,
-                                 toolbarSpacing, toolbarSpacing);
-
-    // TODO(M3): create/share the global Hgi and UsdImagingGLEngine here.
-    //   Prerequisite: Qt::AA_ShareOpenGLContexts must be set before
-    //   QApplication is created (Qtenv startup, see docs/02-architecture §4).
-    //   Per-platform Hgi backend (Decision D6):
-    //     • Linux / Windows: HgiGL  (OpenGL ≥ 4.5 required)
-    //     • macOS:           HgiMetal + hgiInterop composite into QOpenGLWidget FBO
-    //   Skeleton: no engine created yet.
+    if (!s_hgi) {
+        s_hgi = Hgi::CreatePlatformDefaultHgi();
+        if (s_hgi) {
+            s_driver = HdDriver{ HgiTokens->renderDriver, VtValue(s_hgi.get()) };
+            qDebug() << "UsdViewer: shared Hgi created:"
+                     << QString::fromStdString(s_hgi->GetAPIName());
+        }
+    }
+    return s_hgi.get();
 }
 
 // ---------------------------------------------------------------------------
-// IOsgViewer pure-virtual overrides
+// UsdViewer
 // ---------------------------------------------------------------------------
 
-void UsdViewer::setFloatingToolbar(QToolBar *toolbar)
+UsdViewer::UsdViewer(QWidget *parent) : IOsgViewer(parent)
 {
-    // Mirrors DummyOsgViewer::setFloatingToolbar (iosgviewer.cc line 130-133)
-    // and OsgViewer::setFloatingToolbar (osgviewer.cc lines 549-552).
-    ((QGridLayout *)layout())->addWidget(toolbar, 0, 0, Qt::AlignRight | Qt::AlignTop);
+    // same layout convention as DummyOsgViewer / OsgViewer (floating toolbar slot)
+    auto *grid = new QGridLayout(this);
+    const int toolbarSpacing = 4;
+    grid->setContentsMargins(toolbarSpacing, toolbarSpacing, toolbarSpacing, toolbarSpacing);
+
+#ifdef Q_OS_MAC
+    // Native child hosting the CAMetalLayer sublayer (validated spike recipe).
+    // Transparent for mouse so interaction events land on this viewer.
+    metalHost = new QWidget(this);
+    metalHost->setAttribute(Qt::WA_NativeWindow);
+    metalHost->setAttribute(Qt::WA_NoSystemBackground);
+    metalHost->setAttribute(Qt::WA_OpaquePaintEvent);
+    metalHost->setAttribute(Qt::WA_TransparentForMouseEvents);
+    metalHost->lower();
+    metalHost->setGeometry(rect());
+    metalHost->show();
+#endif
+
+    heartbeat.setInterval(33);  // ~30 fps, render-on-demand
+    connect(&heartbeat, &QTimer::timeout, this, [this]() {
+        if (engine != nullptr)
+            renderNow();
+    });
+}
+
+UsdViewer::~UsdViewer()
+{
+#ifdef Q_OS_MAC
+    if (presenter) {
+        usdmetal::destroyPresenter(presenter);
+        presenter = nullptr;
+    }
+#endif
+    delete engine;
+    engine = nullptr;
+}
+
+cScene3DNode *UsdViewer::sceneHandle() const
+{
+    return osgCanvas ? osgCanvas->getScene() : nullptr;
+}
+
+void UsdViewer::ensureEngine()
+{
+    if (engine)
+        return;
+    Hgi *hgi = ensureSharedHgi();
+    if (!hgi) {
+        qWarning() << "UsdViewer: could not create platform Hgi";
+        return;
+    }
+    UsdImagingGLEngine::Parameters params;
+    params.driver = s_driver;
+    engine = new UsdImagingGLEngine(params);
+#ifdef Q_OS_MAC
+    // Metal-native present: we composite the color AOV ourselves.
+    engine->SetEnablePresentation(false);
+    engine->SetRendererAov(HdAovTokens->color);
+#endif
+    qDebug() << "UsdViewer: engine renderer:"
+             << QString::fromStdString(engine->GetCurrentRendererId().GetString());
 }
 
 void UsdViewer::setOsgCanvas(cOsgCanvas *canvas)
 {
+    if (osgCanvas == canvas)
+        return;
     osgCanvas = canvas;
-
-    // Read hints from the new canvas immediately so the viewer is configured
-    // before the first repaint.  applyViewerHints() is a no-op in M2 but will
-    // be filled in during M5.
-    applyViewerHints();
-
-    // TODO(M3): if canvas != nullptr, look up (or build) the UsdStage via
-    //   StageCache::getInstance().getOrCreate(canvas).  If canvas == nullptr,
-    //   release the previous stage reference.
-
-    // Schedule a repaint so the placeholder / rendered content is updated.
-    update();
+    if (osgCanvas) {
+        applyViewerHints();
+        ensureEngine();
+    }
+    refresh();
 }
-
-// NOTE: getOsgCanvas() is defined inline in usdviewer.h.
 
 void UsdViewer::applyViewerHints()
 {
-    // TODO(M5): read osgCanvas hints and push them to the engine, e.g.:
-    //   if (!osgCanvas) return;
-    //   cOsgCanvas::Color c = osgCanvas->getClearColor();
-    //   params.clearColor = GfVec4f(c.red/255.f, c.green/255.f, c.blue/255.f, 1.f);
-    //   setFieldOfView(osgCanvas->getFieldOfViewAngle());
-    //   selectCameraController(osgCanvas->getCameraManipulatorType());
-    //   if (osgCanvas->hasZLimits()) setZNearFar(osgCanvas->getZNear(), osgCanvas->getZFar());
-    //   engine->SetLightingState(headlight); // Storm needs explicit lighting (D2)
-    //   update();
-    //
-    // Mirror: OsgViewer::applyViewerHints() in osgviewer.cc lines 509-531.
+    if (!osgCanvas)
+        return;
+    const cOsgCanvas::Viewpoint& vp = osgCanvas->getGenericViewpoint();
+    if (vp.valid) {
+        camEye    = GfVec3d(vp.eye.x, vp.eye.y, vp.eye.z);
+        camCenter = GfVec3d(vp.center.x, vp.center.y, vp.center.z);
+        camUp     = GfVec3d(vp.up.x, vp.up.y, vp.up.z);
+    }
+    refresh();
+}
 
-    (void)osgCanvas; // suppress unused-variable warning for M2 skeleton
+void UsdViewer::setFloatingToolbar(QToolBar *toolbar)
+{
+    ((QGridLayout *)layout())->addWidget(toolbar, 0, 0, Qt::AlignRight | Qt::AlignTop);
+    toolbar->raise();
 }
 
 void UsdViewer::enable()
 {
-    // TODO(M3): associate this viewer with the shared CompositeViewer equivalent:
-    //   start the per-viewer heartbeat timer (30 fps QBasicTimer, gated on
-    //   !engine->IsConverged()).  The OSG HeartBeat singleton cannot be reused
-    //   (it drives osgViewer::CompositeViewer::frame()); we need our own.
-    //   Mirror: OsgViewer::enable() adding the view to the CompositeViewer
-    //   (osgviewer.cc lines 465-471), HeartBeat::start() (osgviewer.cc line 274).
+    heartbeat.start();
+    refresh();
 }
 
 void UsdViewer::disable()
 {
-    // TODO(M3): stop the heartbeat timer.  Release any per-view engine resources
-    //   that must not render while invisible.
-    //   Mirror: OsgViewer::disable() removing the view from CompositeViewer
-    //   (osgviewer.cc lines 473-479), HeartBeat::stop() (osgviewer.cc line 280).
+    heartbeat.stop();
 }
 
 void UsdViewer::refresh()
 {
-    // Skeleton: just schedule a repaint.  The canvas contents are picked up in
-    // paintEvent (M2) and will be picked up in paintGL (M3).
-    //
-    // TODO(M3): re-sync the UsdStage from StageCache if the scene has changed;
-    //   call engine->Render(...) in paintGL instead.
-    //   Mirror: OsgViewer::refresh() (osgviewer.cc lines 491-507).
-    update();
+#ifdef Q_OS_MAC
+    renderNow();
+#else
+    update();   // schedules paintGL
+#endif
 }
 
 void UsdViewer::resetViewer()
 {
-    // Called when osgCanvas is set to nullptr (viewer cleared).
-    // TODO(M5): reset GfCamera to default position/orientation; reset clear
-    //   colour to neutral grey (matching OsgViewer::resetViewer colour 0.9/0.9/0.9).
-    //   Mirror: OsgViewer::resetViewer() (osgviewer.cc lines 533-541).
+    camEye    = GfVec3d(4.0, 4.0, 3.0);
+    camCenter = GfVec3d(0.0, 0.0, 0.0);
+    camUp     = GfVec3d(0.0, 0.0, 1.0);
+    refresh();
 }
 
-std::vector<cObject *> UsdViewer::objectsAt(const QPoint &pos)
+void UsdViewer::configureFrame(int pw, int ph)
 {
-    // TODO(M4): implement USD picking:
-    //   1. Call engine->TestIntersection(resolveDeep=true, pos, ...) to obtain
-    //      hitPrimPath (SdfPath).
-    //   2. Walk hitPrimPath.GetParentPath() ancestors through the StageCache
-    //      SdfPath→cObject registry (prim-path → object registry, Decision D4,
-    //      docs/02-architecture §5) to collect matching cObject pointers.
-    //   3. Q_EMIT objectsPicked(objects) to notify inspectors.
-    //   Mirrors OsgViewer::objectsAt() NodePath walk (osgviewer.cc lines 554-575).
-    //
-    // Note (D4): thin geometry (lines, arrowheads) picks poorly with an ID pass;
-    //   use resolveDeep=true plus invisible thick pick-proxy meshes alongside
-    //   visible curves where needed (Risk R2).
-    (void)pos;
-    return {};
+    const int w = std::max(1, width());
+    const int h = std::max(1, height());
+
+    GfMatrix4d view;
+    view.SetLookAt(camEye, camCenter, camUp);
+
+    double fovy = osgCanvas ? osgCanvas->getFieldOfViewAngle() : 30.0;
+    double zNear = (osgCanvas && osgCanvas->hasZLimits()) ? osgCanvas->getZNear() : 0.1;
+    double zFar  = (osgCanvas && osgCanvas->hasZLimits()) ? osgCanvas->getZFar()  : 100000.0;
+
+    GfFrustum frustum;
+    frustum.SetPerspective(fovy, double(w) / h, zNear, zFar);
+    lastFrustum = frustum;
+    lastViewMatrix = view;
+
+    engine->SetRenderBufferSize(GfVec2i(pw, ph));
+    engine->SetFraming(CameraUtilFraming(GfRect2i(GfVec2i(0, 0), pw, ph)));
+    engine->SetCameraState(view, frustum.ComputeProjectionMatrix());
+
+    // Storm has no implicit light: headlight at the eye.
+    GlfSimpleLight headlight;
+    headlight.SetPosition(GfVec4f(float(camEye[0]), float(camEye[1]), float(camEye[2]), 1.0f));
+    headlight.SetDiffuse(GfVec4f(1, 1, 1, 1));
+    headlight.SetSpecular(GfVec4f(1, 1, 1, 1));
+    headlight.SetAmbient(GfVec4f(0, 0, 0, 1));
+    GlfSimpleMaterial material;
+    engine->SetLightingState({ headlight }, material, GfVec4f(0.2f, 0.2f, 0.2f, 1.0f));
 }
 
-// ---------------------------------------------------------------------------
-// Static lifecycle
-// ---------------------------------------------------------------------------
-
-void UsdViewer::uninit()
+void UsdViewer::renderNow()
 {
-    // TODO(M3): destroy the shared Hgi / HdDriver instance.
-    //   The Hgi is a process-wide singleton created at first UsdViewer
-    //   construction; it must be destroyed after all UsdImagingGLEngines are gone.
-    //   Mirror: OsgViewer::uninit() stopping HeartBeat and releasing the
-    //   CompositeViewer (osgviewer.cc lines 543-547).
+    cScene3DNode *handle = sceneHandle();
+    if (!handle || !handle->getStage())
+        return;
+    ensureEngine();
+    if (!engine)
+        return;
+
+#ifdef Q_OS_MAC
+    if (!isVisible())
+        return;
+    const qreal dpr = devicePixelRatioF();
+    const int pw = std::max(1, int(width() * dpr));
+    const int ph = std::max(1, int(height() * dpr));
+
+    configureFrame(pw, ph);
+
+    UsdImagingGLRenderParams rp;
+    cOsgCanvas::Color cc = osgCanvas->getClearColor();
+    rp.clearColor = GfVec4f(cc.red/255.0f, cc.green/255.0f, cc.blue/255.0f, 1.0f);
+    rp.frame = UsdTimeCode::Default();
+    rp.enableLighting = true;
+    engine->Render(handle->getStage()->GetPseudoRoot(), rp);
+
+    if (!presenter)
+        presenter = usdmetal::createPresenter(metalHost, engine->GetHgi());
+    if (presenter)
+        usdmetal::present(presenter, engine, metalHost);
+#else
+    update();   // GL path renders in paintGL
+#endif
 }
 
-// ---------------------------------------------------------------------------
-// Placeholder paintEvent (M2)
-// ---------------------------------------------------------------------------
-
-void UsdViewer::paintEvent(QPaintEvent * /*event*/)
+#ifndef Q_OS_MAC
+void UsdViewer::initializeGL()
 {
-    // Placeholder rendering — same QPainter-on-QOpenGLWidget pattern as
-    // DummyOsgViewer::paintEvent (iosgviewer.cc lines 113-128).
-    // This is the same already-working pattern DummyOsgViewer uses, so no
-    // special GL-state handling is needed here.
-    //
-    // TODO(M3): remove this paintEvent override and implement paintGL() to
-    //   drive the UsdImagingGLEngine render loop (see docs/02-architecture §4
-    //   paintGL() sketch).  Text overlay (M6) goes in a QPainter pass after
-    //   Render(); use the verified usdview workaround to avoid GL state
-    //   corruption (docs/02 §4.2).
-
-    QPainter painter(this);
-
-    QRect rect({0, 0}, size());
-
-    QPalette pal = palette();
-    pal.setCurrentColorGroup(QPalette::Disabled);
-
-    painter.fillRect(rect, pal.window());
-
-    painter.setPen(QPen(pal.text().color()));
-    painter.drawText(rect.adjusted(50, 50, -50, -50), // inset so toolbar won't overlap
-                     "OpenUSD viewer (skeleton)\n"
-                     "Hydra rendering arrives in milestone M3.");
+    // HgiGL requires OpenGL >= 4.5 (Linux/WSL2 path).
+    qDebug() << "UsdViewer: GL context" << context()->format().majorVersion()
+             << "." << context()->format().minorVersion();
 }
 
-} // qtenv
-} // omnetpp
+void UsdViewer::paintGL()
+{
+    cScene3DNode *handle = sceneHandle();
+    if (!handle || !handle->getStage())
+        return;
+    ensureEngine();
+    if (!engine)
+        return;
+
+    const qreal dpr = devicePixelRatioF();
+    const int pw = std::max(1, int(width() * dpr));
+    const int ph = std::max(1, int(height() * dpr));
+
+    // HgiGL renders directly; present into this widget's FBO.
+    engine->SetEnablePresentation(true);
+    engine->SetPresentationOutput(HgiTokens->OpenGL,
+        VtValue(uint32_t(defaultFramebufferObject())));
+
+    configureFrame(pw, ph);
+
+    UsdImagingGLRenderParams rp;
+    cOsgCanvas::Color cc = osgCanvas->getClearColor();
+    rp.clearColor = GfVec4f(cc.red/255.0f, cc.green/255.0f, cc.blue/255.0f, 1.0f);
+    rp.frame = UsdTimeCode::Default();
+    rp.enableLighting = true;
+    engine->Render(handle->getStage()->GetPseudoRoot(), rp);
+}
+#endif
+
+void UsdViewer::resizeEvent(QResizeEvent *event)
+{
+    IOsgViewer::resizeEvent(event);
+#ifdef Q_OS_MAC
+    if (metalHost)
+        metalHost->setGeometry(rect());
+    if (presenter)
+        usdmetal::resizePresenter(presenter, metalHost);
+#endif
+    refresh();
+}
+
+void UsdViewer::showEvent(QShowEvent *event)
+{
+    IOsgViewer::showEvent(event);
+    refresh();
+}
+
+// ---------------------------------------------------------------------------
+// Interaction: orbit (left-drag), zoom (wheel), pick (left-click)
+// ---------------------------------------------------------------------------
+
+std::vector<cObject *> UsdViewer::objectsAt(const QPoint& pos)
+{
+    std::vector<cObject *> objects;
+    cScene3DNode *handle = sceneHandle();
+    if (!handle || !handle->getStage() || !engine)
+        return objects;
+
+    const int w = std::max(1, width());
+    const int h = std::max(1, height());
+    const double ndcX = (2.0 * pos.x() / w) - 1.0;
+    const double ndcY = 1.0 - (2.0 * pos.y() / h);
+
+    GfFrustum pickFrustum = lastFrustum;
+    pickFrustum.Transform(lastViewMatrix.GetInverse());
+    GfFrustum narrowed = pickFrustum.ComputeNarrowedFrustum(
+        GfVec2d(ndcX, ndcY), GfVec2d(1.0 / w, 1.0 / h));
+
+    GfVec3d hitPoint, hitNormal;
+    SdfPath hitPrimPath, hitInstancerPath;
+    int hitInstanceIndex = 0;
+    UsdImagingGLRenderParams rp;
+    rp.frame = UsdTimeCode::Default();
+
+    bool hit = engine->TestIntersection(
+        narrowed.ComputeViewMatrix(), narrowed.ComputeProjectionMatrix(),
+        handle->getStage()->GetPseudoRoot(), rp,
+        &hitPoint, &hitNormal, &hitPrimPath, &hitInstancerPath, &hitInstanceIndex);
+
+    if (hit) {
+        if (cObject *obj = handle->lookupObjectOrAncestor(hitPrimPath))
+            objects.push_back(obj);
+    }
+    return objects;
+}
+
+void UsdViewer::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton) {
+        lastMousePos = event->position();
+        std::vector<cObject *> objects = objectsAt(event->position().toPoint());
+        if (!objects.empty())
+            Q_EMIT objectsPicked(objects);
+    }
+}
+
+void UsdViewer::mouseMoveEvent(QMouseEvent *event)
+{
+    if (!(event->buttons() & Qt::LeftButton))
+        return;
+
+    const QPointF delta = event->position() - lastMousePos;
+    lastMousePos = event->position();
+
+    const double azimuthDeg   = -delta.x() * 0.5;
+    const double elevationDeg =  delta.y() * 0.5;
+
+    GfVec3d arm = camEye - camCenter;
+    const double azRad = azimuthDeg * M_PI / 180.0;
+    const double cosA = std::cos(azRad), sinA = std::sin(azRad);
+    GfVec3d rotatedArm(cosA*arm[0] - sinA*arm[1], sinA*arm[0] + cosA*arm[1], arm[2]);
+
+    const double len = rotatedArm.GetLength();
+    const double elRad = elevationDeg * M_PI / 180.0;
+    const double currentEl = std::atan2(rotatedArm[2],
+        std::sqrt(rotatedArm[0]*rotatedArm[0] + rotatedArm[1]*rotatedArm[1]));
+    const double newEl = std::max(-M_PI*0.49, std::min(M_PI*0.49, currentEl + elRad));
+    const double xyLen = len * std::cos(newEl);
+    const double az = std::atan2(rotatedArm[1], rotatedArm[0]);
+    camEye = camCenter + GfVec3d(xyLen*std::cos(az), xyLen*std::sin(az), len*std::sin(newEl));
+
+    renderNow();
+}
+
+void UsdViewer::wheelEvent(QWheelEvent *event)
+{
+    const double steps = event->angleDelta().y() / 120.0;
+    const double factor = std::pow(0.9, steps);   // wheel up zooms in
+    GfVec3d arm = camEye - camCenter;
+    if (arm.GetLength() * factor > 0.01)
+        camEye = camCenter + arm * factor;
+    renderNow();
+}
+
+void UsdViewer::shutdownUsd()
+{
+    s_hgi.reset();
+}
+
+// ---------------------------------------------------------------------------
+// Factory — self-registers on library load, like RealOsgViewerFactory.
+// ---------------------------------------------------------------------------
+
+class UsdViewerFactory : public IOsgViewerFactory
+{
+  public:
+    UsdViewerFactory() { osgViewerFactory = this; }
+
+    IOsgViewer *createViewer() override { return new UsdViewer(); }
+    void shutdown() override { UsdViewer::shutdownUsd(); }
+
+    // The pointers flowing through here are cScene3DNode* in disguise:
+    // cEnvir::refSceneNode() reinterpret_casts to osg::Node* for the legacy
+    // chain (Qtenv::refOsgNode -> IOsgViewer::refNode -> here); we cast back.
+    void refNode(osg::Node *node) override {
+        if (node) reinterpret_cast<cScene3DNode *>(node)->ref();
+    }
+    void unrefNode(osg::Node *node) override {
+        if (node) reinterpret_cast<cScene3DNode *>(node)->unref();
+    }
+};
+
+static UsdViewerFactory usdViewerFactoryInstance;
+
+}  // namespace qtenv
+}  // namespace omnetpp
